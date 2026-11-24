@@ -1,0 +1,168 @@
+import { app, BrowserWindow, Menu, shell } from 'electron'
+import path from 'path'
+import { IPC } from '@shared/ipc'
+import { EnvironmentRegistry } from './ssh/configParser'
+import { SshControlMaster } from './ssh/controlMaster'
+import { TerminalManager } from './terminal/terminalManager'
+import { UnifiedVfs } from './fs/vfs'
+import { TransferManager } from './fs/transferManager'
+import { SearchManager } from './search/searchManager'
+import { registerIpcHandlers } from './ipc/registerHandlers'
+
+let mainWindow: BrowserWindow | null = null
+let registry: EnvironmentRegistry
+let controlMaster: SshControlMaster
+let terminalManager: TerminalManager
+let vfs: UnifiedVfs
+let transferManager: TransferManager
+let searchManager: SearchManager
+
+function sendToRenderer(channel: string, ...args: any[]): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, ...args)
+  }
+}
+
+function createWindow(): void {
+  mainWindow = new BrowserWindow({
+    width: 1480,
+    height: 920,
+    minWidth: 960,
+    minHeight: 620,
+    title: 'MultiplexIDE',
+    backgroundColor: '#272822', // Classic Sublime Text 3 Monokai canvas
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 13, y: 10 },
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+  }
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+}
+
+function buildMacMenu(): void {
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' }
+      ]
+    },
+    {
+      label: 'Window',
+      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+    }
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+app.whenReady().then(() => {
+  app.setName('MultiplexIDE')
+  buildMacMenu()
+
+  registry = new EnvironmentRegistry(app.getPath('userData'))
+  controlMaster = new SshControlMaster()
+  vfs = new UnifiedVfs(controlMaster)
+
+  const markConnected = (envId: string) => {
+    const env = registry.setStatus(envId, 'connected', undefined)
+    if (env) sendToRenderer(IPC.ENV_STATUS_CHANGED, env)
+  }
+
+  terminalManager = new TerminalManager(controlMaster, {
+    onData: (terminalId, data) => sendToRenderer(IPC.TERM_DATA, terminalId, data),
+    onExit: (terminalId, envId, exitCode) => sendToRenderer(IPC.TERM_EXIT, terminalId, envId, exitCode),
+    onNotification: (notification) => sendToRenderer(IPC.TERM_NOTIFICATION, notification),
+    onSshConnected: markConnected
+  })
+
+  transferManager = new TransferManager(vfs, (task) => {
+    sendToRenderer(IPC.TRANSFER_UPDATE, task)
+  })
+
+  searchManager = new SearchManager(controlMaster, {
+    onMatchBatch: (matches) => sendToRenderer(IPC.SEARCH_MATCH_BATCH, matches),
+    onDone: (done) => sendToRenderer(IPC.SEARCH_DONE, done),
+    onSshConnected: markConnected
+  })
+
+  registerIpcHandlers({
+    registry,
+    controlMaster,
+    terminalManager,
+    vfs,
+    transferManager,
+    searchManager,
+    getMainWindow: () => mainWindow
+  })
+
+  createWindow()
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow()
+    }
+  })
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
+})
+
+app.on('before-quit', () => {
+  terminalManager?.killAll()
+  vfs?.disposeAll()
+})

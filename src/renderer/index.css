@@ -1,0 +1,200 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+   Authentic Sublime Text 3 Themes (Monokai Classic / Mariana / Boxy Tomorrow)
+   ============================================================================ */
+:root,
+[data-theme='monokai'] {
+  --st-titlebar: #181915;
+  --st-sidebar: #1d1e1a;
+  --st-sidebar-header: #8f908a;
+  --st-sidebar-hover: #272822;
+  --st-sidebar-active: #34352e;
+  --st-tabbar: #161713;
+  --st-tab-inactive: #20211c;
+  --st-tab-hover: #242520;
+  --st-editor: #272822;
+  --st-panel: #1e1f1b;
+  --st-terminal: #22231e;
+  --st-statusbar: #181915;
+  --st-input: #141511;
+  --st-border: #11120e;
+  --st-border-light: #383930;
+  --st-text: #f8f8f2;
+  --st-text-muted: #a6a69c;
+  --st-text-dim: #75715e;
+  --st-accent: #a6e22e;
+  --st-accent-blue: #66d9ef;
+  --st-dirty: #fd971f;
+  --st-green: #a6e22e;
+  --st-red: #f92672;
+  --st-yellow: #e6db74;
+  --st-purple: #ae81ff;
+}
+
+[data-theme='mariana'] {
+  --st-titlebar: #1e232a;
+  --st-sidebar: #242a32;
+  --st-sidebar-header: #8b98a9;
+  --st-sidebar-hover: #2c333d;
+  --st-sidebar-active: #37404c;
+  --st-tabbar: #1c2127;
+  --st-tab-inactive: #252b33;
+  --st-tab-hover: #2a313a;
+  --st-editor: #303841;
+  --st-panel: #242a32;
+  --st-terminal: #272e36;
+  --st-statusbar: #1e232a;
+  --st-input: #1a1f25;
+  --st-border: #15191f;
+  --st-border-light: #3b4552;
+  --st-text: #d8dee9;
+  --st-text-muted: #9aa7b8;
+  --st-text-dim: #65737e;
+  --st-accent: #5fb3b3;
+  --st-accent-blue: #6699cc;
+  --st-dirty: #f99157;
+  --st-green: #99c794;
+  --st-red: #ec5f67;
+  --st-yellow: #fac863;
+  --st-purple: #c594c5;
+}
+
+[data-theme='boxy'] {
+  --st-titlebar: #181a1f;
+  --st-sidebar: #1d1f25;
+  --st-sidebar-header: #848b98;
+  --st-sidebar-hover: #252830;
+  --st-sidebar-active: #2f333d;
+  --st-tabbar: #16181d;
+  --st-tab-inactive: #1e2127;
+  --st-tab-hover: #23272e;
+  --st-editor: #282c34;
+  --st-panel: #1e2127;
+  --st-terminal: #21252b;
+  --st-statusbar: #181a1f;
+  --st-input: #15171c;
+  --st-border: #121417;
+  --st-border-light: #333842;
+  --st-text: #dcdfe4;
+  --st-text-muted: #9da5b4;
+  --st-text-dim: #5c6370;
+  --st-accent: #61afef;
+  --st-accent-blue: #56b6c2;
+  --st-dirty: #e5c07b;
+  --st-green: #98c379;
+  --st-red: #e06c75;
+  --st-yellow: #e5c07b;
+  --st-purple: #c678dd;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--st-editor);
+  color: var(--st-text);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.drag-region {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Sublime Text 3 ultra-subtle scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 0px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+/* Allotment split borders */
+:root {
+  --separator-border: var(--st-border);
+  --focus-border: var(--st-border-light);
+}
+
+/* Authentic Sublime Text 3 Tab Bar & Tabs */
+.st3-tab {
+  position: relative;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px 0 12px;
+  font-size: 11.5px;
+  cursor: pointer;
+  user-select: none;
+  background: var(--st-tab-inactive);
+  color: var(--st-text-dim);
+  border-right: 1px solid var(--st-border);
+  border-top: 1px solid rgba(255, 255, 255, 0.03);
+  margin-top: 4px;
+  border-top-left-radius: 3px;
+  border-top-right-radius: 3px;
+  transition: background-color 60ms ease, color 60ms ease;
+}
+
+.st3-tab:hover {
+  background: var(--st-tab-hover);
+  color: var(--st-text-muted);
+}
+
+.st3-tab-active {
+  background: var(--st-editor) !important;
+  color: var(--st-text) !important;
+  height: 31px;
+  margin-top: 3px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  z-index: 2;
+}
+
+/* Sublime Sidebar Section Header */
+.st3-section-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--st-sidebar-header);
+}
+
+/* Subtle attention dot pulse for background terminal notifications */
+@keyframes st3-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.st3-attention-pulse {
+  animation: st3-pulse 1.4s ease-in-out infinite;
+}
+
+.xterm {
+  padding: 6px 8px;
+  height: 100%;
+}
+.xterm-viewport {
+  overflow-y: auto !important;
+}

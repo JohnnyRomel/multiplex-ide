@@ -1,0 +1,322 @@
+import React, { useEffect } from 'react'
+import { Allotment } from 'allotment'
+import { useAppStore } from '@renderer/stores/useAppStore'
+import { TopToolbar } from './components/Layout/TopToolbar'
+import { StatusBar } from './components/Layout/StatusBar'
+import { AddHostModal } from './components/Sidebar/AddHostModal'
+import { FileTreePanel, SingleEnvFileTree } from './components/Explorer/FileTreePanel'
+import { TransferQueueDrawer } from './components/Explorer/TransferQueueDrawer'
+import { EditorWorkbench } from './components/Editor/EditorWorkbench'
+import { QuickOpenModal } from './components/Editor/QuickOpenModal'
+import { TerminalWorkspaceArea } from './components/Terminal/TerminalPaneTree'
+import { GlobalSearchPanel } from './components/Search/GlobalSearchPanel'
+
+export default function App() {
+  const theme = useAppStore((s) => s.theme)
+  const layoutMode = useAppStore((s) => s.layoutMode)
+  const showSidebar = useAppStore((s) => s.showSidebar)
+  const showTerminalPanel = useAppStore((s) => s.showTerminalPanel)
+  const showSearchPanel = useAppStore((s) => s.showSearchPanel)
+  const activeEnvId = useAppStore((s) => s.activeEnvId)
+  const secondaryEnvId = useAppStore((s) => s.secondaryEnvId)
+  const environments = useAppStore((s) => s.environments)
+  const envRootPaths = useAppStore((s) => s.envRootPaths)
+  const toasts = useAppStore((s) => s.toasts)
+  const dismissToast = useAppStore((s) => s.dismissToast)
+
+  const setTheme = useAppStore((s) => s.setTheme)
+  const setConfigPath = useAppStore((s) => s.setConfigPath)
+  const setEnvironments = useAppStore((s) => s.setEnvironments)
+  const upsertEnvironment = useAppStore((s) => s.upsertEnvironment)
+  const ensureTerminalForEnv = useAppStore((s) => s.ensureTerminalForEnv)
+  const handleTerminalExited = useAppStore((s) => s.handleTerminalExited)
+  const pushNotification = useAppStore((s) => s.pushNotification)
+  const upsertTransfer = useAppStore((s) => s.upsertTransfer)
+  const setTransfers = useAppStore((s) => s.setTransfers)
+  const appendSearchMatches = useAppStore((s) => s.appendSearchMatches)
+  const finishGlobalSearch = useAppStore((s) => s.finishGlobalSearch)
+  const setEnvGitBranch = useAppStore((s) => s.setEnvGitBranch)
+  const setEnvGitStatus = useAppStore((s) => s.setEnvGitStatus)
+  const setSecondaryEnvId = useAppStore((s) => s.setSecondaryEnvId)
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+  }, [theme])
+
+  useEffect(() => {
+    let mounted = true
+    const init = async () => {
+      const [cfgInfo, envs, xfers] = await Promise.all([
+        window.multiplex.getConfigInfo(),
+        window.multiplex.listEnvironments(),
+        window.multiplex.listTransfers()
+      ])
+      if (!mounted) return
+      setConfigPath(cfgInfo.configPath)
+      if (cfgInfo.theme) {
+        setTheme(cfgInfo.theme, false)
+      }
+      setEnvironments(envs)
+      setTransfers(xfers)
+      const firstId = envs[0]?.id || 'local'
+      await ensureTerminalForEnv(firstId)
+    }
+    void init()
+
+    const unsubs = [
+      window.multiplex.onConfigUpdated(({ environments: nextEnvs, theme: nextTheme }) => {
+        setEnvironments(nextEnvs, true)
+        if (nextTheme) setTheme(nextTheme, false)
+      }),
+      window.multiplex.onEnvStatusChanged((env) => upsertEnvironment(env)),
+      window.multiplex.onTerminalExit((terminalId, envId) => handleTerminalExited(terminalId, envId)),
+      window.multiplex.onTerminalNotification((n) => pushNotification(n)),
+      window.multiplex.onTransferUpdate((task) => upsertTransfer(task)),
+      window.multiplex.onSearchMatchBatch((batch) => appendSearchMatches(batch)),
+      window.multiplex.onSearchDone((done) => finishGlobalSearch(done))
+    ]
+
+    return () => {
+      mounted = false
+      unsubs.forEach((fn) => fn())
+    }
+  }, [])
+
+  // Refresh Git branch & status for active connected workspace
+  useEffect(() => {
+    const env = environments.find((e) => e.id === activeEnvId)
+    if (!env || env.status !== 'connected') return
+    const root = envRootPaths[env.id] || env.defaultPath
+
+    let cancelled = false
+    const refreshGit = async () => {
+      const [branch, statuses] = await Promise.all([
+        window.multiplex.getGitBranch(env.id, root).catch(() => null),
+        window.multiplex.getGitStatus(env.id, root).catch(() => [])
+      ])
+      if (cancelled) return
+      setEnvGitBranch(env.id, branch)
+      const map: Record<string, string> = {}
+      for (const st of statuses) map[st.path] = st.status
+      setEnvGitStatus(env.id, map)
+    }
+    void refreshGit()
+    const timer = setInterval(refreshGit, 12_000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [activeEnvId, environments, envRootPaths])
+
+  // Capture-phase global shortcuts so Monaco & xterm never swallow Cmd+P / Cmd+Shift+F / Cmd+1..9 / Cmd+,
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.metaKey) return
+      const state = useAppStore.getState()
+
+      // Cmd+1..9 -> Switch workspace
+      if (!e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
+        const idx = parseInt(e.key, 10) - 1
+        const target = state.environments[idx]
+        if (target) {
+          e.preventDefault()
+          e.stopPropagation()
+          state.setActiveEnv(target.id)
+        }
+        return
+      }
+
+      // Alt+Cmd+1 / Alt+Cmd+2 -> Sublime Column Layouts
+      if (e.altKey && !e.shiftKey && (e.code === 'Digit1' || e.code === 'Digit2')) {
+        e.preventDefault()
+        e.stopPropagation()
+        state.setEditorColumns(e.code === 'Digit2' ? 2 : 1)
+        return
+      }
+
+      const key = e.key.toLowerCase()
+
+      // Cmd+, -> Open config.json in Editor (Sublime Preferences UX!)
+      if (!e.shiftKey && !e.altKey && e.key === ',') {
+        e.preventDefault()
+        e.stopPropagation()
+        void state.openConfigFile()
+        return
+      }
+
+      // Cmd+P -> Sublime Goto Anything
+      if (!e.shiftKey && !e.altKey && key === 'p') {
+        e.preventDefault()
+        e.stopPropagation()
+        state.setShowQuickOpen(!state.showQuickOpen)
+        return
+      }
+
+      // Cmd+Shift+F -> Sublime Find in Files
+      if (e.shiftKey && !e.altKey && key === 'f') {
+        e.preventDefault()
+        e.stopPropagation()
+        state.setShowSearchPanel(true)
+        return
+      }
+
+      // Cmd+B -> Toggle Sidebar
+      if (!e.shiftKey && !e.altKey && key === 'b') {
+        e.preventDefault()
+        e.stopPropagation()
+        state.toggleSidebar()
+        return
+      }
+
+      // Cmd+J -> Toggle Terminal Panel
+      if (!e.shiftKey && !e.altKey && key === 'j') {
+        e.preventDefault()
+        e.stopPropagation()
+        state.toggleTerminalPanel()
+        return
+      }
+
+      // Cmd+\ and Cmd+Shift+\ -> Split Terminal
+      if (!e.altKey && e.code === 'Backslash') {
+        e.preventDefault()
+        e.stopPropagation()
+        void state.splitTerminal(state.activeEnvId, e.shiftKey ? 'vertical' : 'horizontal')
+        return
+      }
+
+      // Cmd+W -> Close active editor tab
+      if (!e.shiftKey && !e.altKey && key === 'w' && state.activeFocusArea === 'editor' && state.activeTabId) {
+        e.preventDefault()
+        e.stopPropagation()
+        state.closeTab(state.activeTabId)
+        return
+      }
+
+      // Cmd+S -> Save active editor tab
+      if (!e.shiftKey && !e.altKey && key === 's') {
+        const targetId =
+          state.editorFocusGroup === 1 && state.editorColumns === 2 ? state.secondaryTabId : state.activeTabId
+        if (targetId) {
+          e.preventDefault()
+          e.stopPropagation()
+          void state.saveTab(targetId)
+        }
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [])
+
+  return (
+    <div className="flex h-screen w-screen flex-col overflow-hidden">
+      <TopToolbar />
+
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        {layoutMode === 'terminal' ? (
+          <TerminalWorkspaceArea />
+        ) : layoutMode === 'transfer' ? (
+          <Allotment vertical>
+            <Allotment.Pane minSize={240}>
+              <Allotment proportionalLayout>
+                <Allotment.Pane minSize={260}>
+                  <SingleEnvFileTree envId={activeEnvId} />
+                </Allotment.Pane>
+                <Allotment.Pane minSize={260}>
+                  <SingleEnvFileTree
+                    envId={secondaryEnvId}
+                    headerSlot={
+                      <div className="flex items-center gap-1.5">
+                        <span className="st3-section-title">Target:</span>
+                        <select
+                          value={secondaryEnvId}
+                          onChange={(e) => setSecondaryEnvId(e.target.value)}
+                          className="rounded border px-1.5 py-0.5 text-[11px] font-mono outline-none"
+                          style={{
+                            backgroundColor: 'var(--st-input)',
+                            borderColor: 'var(--st-border-light)',
+                            color: 'var(--st-text)'
+                          }}
+                        >
+                          {environments.map((e) => (
+                            <option key={e.id} value={e.id}>
+                              {e.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    }
+                  />
+                </Allotment.Pane>
+              </Allotment>
+            </Allotment.Pane>
+            {showTerminalPanel && (
+              <Allotment.Pane preferredSize="32%" minSize={140}>
+                <TerminalWorkspaceArea />
+              </Allotment.Pane>
+            )}
+          </Allotment>
+        ) : (
+          /* Unified Sublime Text 3 Layout: Single Clean Left Sidebar + Editor/Search/Terminal */
+          <Allotment>
+            {showSidebar && (
+              <Allotment.Pane preferredSize={250} minSize={185} maxSize={480}>
+                <FileTreePanel />
+              </Allotment.Pane>
+            )}
+
+            <Allotment.Pane minSize={420}>
+              <Allotment vertical>
+                <Allotment.Pane minSize={180}>
+                  <EditorWorkbench />
+                </Allotment.Pane>
+
+                {showSearchPanel && (
+                  <Allotment.Pane preferredSize="30%" minSize={145}>
+                    <GlobalSearchPanel />
+                  </Allotment.Pane>
+                )}
+
+                {showTerminalPanel && (
+                  <Allotment.Pane preferredSize="34%" minSize={120}>
+                    <TerminalWorkspaceArea />
+                  </Allotment.Pane>
+                )}
+              </Allotment>
+            </Allotment.Pane>
+          </Allotment>
+        )}
+      </div>
+
+      <StatusBar />
+
+      <QuickOpenModal />
+      <AddHostModal />
+      <TransferQueueDrawer />
+
+      {toasts.length > 0 && (
+        <div className="fixed bottom-8 left-1/2 z-50 -translate-x-1/2 flex flex-col gap-1.5 pointer-events-none">
+          {toasts.map((t) => (
+            <div
+              key={t.id}
+              onClick={() => dismissToast(t.id)}
+              className="pointer-events-auto cursor-pointer rounded border px-3 py-1 text-[11.5px] shadow-xl"
+              style={{
+                backgroundColor: 'var(--st-panel)',
+                borderColor:
+                  t.kind === 'error'
+                    ? 'var(--st-red)'
+                    : t.kind === 'success'
+                      ? 'var(--st-green)'
+                      : 'var(--st-border-light)',
+                color: 'var(--st-text)'
+              }}
+            >
+              {t.text}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
