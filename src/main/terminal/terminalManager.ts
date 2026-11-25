@@ -798,6 +798,9 @@ export class TerminalManager {
     if (!sess) return
     const safeCols = Math.max(10, Math.min(500, Math.floor(cols)))
     const safeRows = Math.max(4, Math.min(200, Math.floor(rows)))
+    if (sess.info.cols === safeCols && sess.info.rows === safeRows) {
+      return
+    }
     sess.info.cols = safeCols
     sess.info.rows = safeRows
     try {

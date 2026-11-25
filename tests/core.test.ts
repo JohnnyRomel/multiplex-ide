@@ -21,6 +21,7 @@ import { TransferManager } from '../src/main/fs/transferManager'
 import { SearchManager, parseGrepLine, parseRgJsonLine, scoreQuickOpenCandidate } from '../src/main/search/searchManager'
 import { enhancedCppLanguage, enhancedPythonLanguage } from '../src/shared/syntaxGrammars'
 import { decodeOsc52Payload } from '../src/shared/osc52'
+import { TerminalFrameBuffer } from '../src/shared/terminalFrameBuffer'
 // @ts-expect-error internal monaco esm module for unit testing Monarch compilation
 import { compile } from 'monaco-editor/esm/vs/editor/standalone/common/monarch/monarchCompile.js'
 import type { Environment, SearchDoneEvent, SearchMatch, TransferTask } from '../src/shared/types'
@@ -493,5 +494,74 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
     const extracted = extractMideTmuxMarker('before\x1b]9991;mide_recent_1\x07after')
     expect(extracted.sessionName).toBe('mide_recent_1')
     expect(extracted.cleaned).toBe('beforeafter')
+  })
+})
+
+describe('Anti-Flicker Terminal Frame Coalescer', () => {
+  it('holds DEC 2026 synchronized frames across split SSH chunks and flushes atomically on ESU', () => {
+    const flushed: string[] = []
+    let frameCb: (() => void) | null = null
+    let timeoutCb: (() => void) | null = null
+    const buf = new TerminalFrameBuffer((b) => flushed.push(b), {
+      scheduleFrame: (cb) => {
+        frameCb = cb
+        return () => {
+          if (frameCb === cb) frameCb = null
+        }
+      },
+      scheduleTimeout: (cb) => {
+        timeoutCb = cb
+        return () => {
+          if (timeoutCb === cb) timeoutCb = null
+        }
+      }
+    })
+
+    // Split `\x1b[?2026h` across two TCP chunks + erase + redraw + `\x1b[?2026l`
+    buf.push('\x1b[?20')
+    buf.push('26h\x1b[2J\x1b[H')
+    expect(flushed).toEqual([])
+    expect(frameCb).toBeNull() // Held until ESU arrives!
+    expect(timeoutCb).not.toBeNull() // Safety watchdog armed
+
+    buf.push('rendered TUI line\x1b[?2026l')
+    expect(flushed).toEqual([])
+    expect(frameCb).not.toBeNull() // Ready for next VSync paint!
+    frameCb!()
+    expect(flushed).toEqual(['\x1b[2J\x1b[Hrendered TUI line'])
+    buf.dispose()
+  })
+
+  it('coalesces tmux 2.8 cursor-hide redraw cycles (`?25l` ... `?25h`) into a single write', () => {
+    const flushed: string[] = []
+    let frameCb: (() => void) | null = null
+    let timeoutCb: (() => void) | null = null
+    const buf = new TerminalFrameBuffer((b) => flushed.push(b), {
+      scheduleFrame: (cb) => {
+        frameCb = cb
+        return () => {
+          if (frameCb === cb) frameCb = null
+        }
+      },
+      scheduleTimeout: (cb) => {
+        timeoutCb = cb
+        return () => {
+          if (timeoutCb === cb) timeoutCb = null
+        }
+      }
+    })
+
+    // Chunk 1: hide cursor + erase lines (typical tmux 2.8 / Ink TUI mid-frame)
+    buf.push('\x1b[?25l\x1b[2K\r')
+    expect(flushed).toEqual([])
+    expect(frameCb).toBeNull() // Briefly held for redraw completion
+    expect(timeoutCb).not.toBeNull()
+
+    // Chunk 2: new text + restore cursor
+    buf.push('agy prompt > \x1b[?25h')
+    expect(frameCb).not.toBeNull()
+    frameCb!()
+    expect(flushed).toEqual(['\x1b[?25l\x1b[2K\ragy prompt > \x1b[?25h'])
+    buf.dispose()
   })
 })

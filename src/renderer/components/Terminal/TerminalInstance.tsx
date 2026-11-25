@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { Columns2, RotateCw, Rows2, Search, WifiOff, X } from 'lucide-react'
+import { TerminalFrameBuffer } from '@shared/terminalFrameBuffer'
 import type { EditorThemeId } from '@shared/types'
 import { useAppStore } from '@renderer/stores/useAppStore'
 import {
@@ -99,6 +100,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
   const xtermRef = useRef<XTerm | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchRef = useRef<SearchAddon | null>(null)
+  const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null)
 
   const theme = useAppStore((s) => s.theme)
   const terminalFontSize = useAppStore((s) => s.terminalFontSize)
@@ -125,7 +127,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     const term = new XTerm({
       fontFamily: 'Menlo, "SF Mono", "JetBrains Mono", Monaco, monospace',
       fontSize: initState.terminalFontSize,
-      lineHeight: 1.28,
+      lineHeight: 1.25,
       cursorBlink: true,
       cursorStyle: 'block',
       macOptionIsMeta: true,
@@ -149,6 +151,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     xtermRef.current = term
     fitRef.current = fitAddon
     searchRef.current = searchAddon
+    lastSentSizeRef.current = null
     registerTerminalInstance(terminalId, term)
 
     // Support OSC 52 so copying inside remote tmux / vim / neovim syncs straight to macOS clipboard!
@@ -164,7 +167,11 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
       if (!el.offsetWidth || !el.offsetHeight) return
       try {
         fitAddon.fit()
-        window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
+        const prev = lastSentSizeRef.current
+        if (!prev || prev.cols !== term.cols || prev.rows !== term.rows) {
+          lastSentSizeRef.current = { cols: term.cols, rows: term.rows }
+          window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
+        }
       } catch {
         // ignore layout race
       }
@@ -177,14 +184,25 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
       window.multiplex.writeTerminal(terminalId, data)
     })
 
+    // Coalesce fragmented SSH packets + DEC 2026 / cursor-hide redraw cycles into atomic VSync writes
+    // so TUI apps (`agy`, vim, tmux 2.8) never flash half-erased frames or jumping cursors!
+    const frameBuffer = new TerminalFrameBuffer((batch) => {
+      term.write(batch)
+    })
+
     const offIpcData = window.multiplex.onTerminalData((id, data) => {
       if (id === terminalId) {
-        term.write(data)
+        frameBuffer.push(data)
       }
     })
 
+    let resizeRaf: number | null = null
     const observer = new ResizeObserver(() => {
-      requestAnimationFrame(doFit)
+      if (resizeRaf !== null) cancelAnimationFrame(resizeRaf)
+      resizeRaf = requestAnimationFrame(() => {
+        resizeRaf = null
+        doFit()
+      })
     })
     observer.observe(el)
 
@@ -244,6 +262,8 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
 
     return () => {
       clearTimeout(settleFitTimer)
+      if (resizeRaf !== null) cancelAnimationFrame(resizeRaf)
+      frameBuffer.dispose()
       unregisterTerminalInstance(terminalId, term)
       osc52Disposable.dispose()
       observer.disconnect()
@@ -261,7 +281,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     }
   }, [theme])
 
-  // Live font size sync (refit PTY rows/cols immediately!)
+  // Live font size sync (refit PTY rows/cols only when dimensions actually change!)
   useEffect(() => {
     const term = xtermRef.current
     const fit = fitRef.current
@@ -271,7 +291,11 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
       requestAnimationFrame(() => {
         try {
           fit.fit()
-          window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
+          const prev = lastSentSizeRef.current
+          if (!prev || prev.cols !== term.cols || prev.rows !== term.rows) {
+            lastSentSizeRef.current = { cols: term.cols, rows: term.rows }
+            window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
+          }
         } catch {
           // ignore
         }
@@ -279,22 +303,33 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     }
   }, [terminalFontSize, isVisible, terminalId])
 
+  // Refit ONLY when becoming visible (never trigger redundant SIGWINCH on focus clicks!)
   useEffect(() => {
     if (isVisible && fitRef.current && xtermRef.current) {
-      const syncFitAndFocus = () => {
+      const syncFit = () => {
         try {
+          const term = xtermRef.current
+          if (!term) return
           fitRef.current?.fit()
-          if (xtermRef.current) {
-            window.multiplex.resizeTerminal(terminalId, xtermRef.current.cols, xtermRef.current.rows)
-            if (isFocused) xtermRef.current.focus()
+          const prev = lastSentSizeRef.current
+          if (!prev || prev.cols !== term.cols || prev.rows !== term.rows) {
+            lastSentSizeRef.current = { cols: term.cols, rows: term.rows }
+            window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
           }
         } catch {
           // ignore
         }
       }
-      requestAnimationFrame(syncFitAndFocus)
-      const timer = setTimeout(syncFitAndFocus, 80)
+      requestAnimationFrame(syncFit)
+      const timer = setTimeout(syncFit, 80)
       return () => clearTimeout(timer)
+    }
+  }, [isVisible, terminalId])
+
+  // Focus xterm cleanly without resizing when focus switches to this pane
+  useEffect(() => {
+    if (isVisible && isFocused && xtermRef.current) {
+      requestAnimationFrame(() => xtermRef.current?.focus())
     }
   }, [isVisible, isFocused, terminalId])
 
