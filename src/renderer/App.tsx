@@ -25,6 +25,7 @@ export default function App() {
   const dismissToast = useAppStore((s) => s.dismissToast)
 
   const setTheme = useAppStore((s) => s.setTheme)
+  const setFontSizes = useAppStore((s) => s.setFontSizes)
   const setConfigPath = useAppStore((s) => s.setConfigPath)
   const setEnvironments = useAppStore((s) => s.setEnvironments)
   const upsertEnvironment = useAppStore((s) => s.upsertEnvironment)
@@ -57,6 +58,15 @@ export default function App() {
       if (cfgInfo.theme) {
         setTheme(cfgInfo.theme, false)
       }
+      if (cfgInfo.editorFontSize || cfgInfo.terminalFontSize) {
+        setFontSizes(
+          {
+            editorFontSize: cfgInfo.editorFontSize,
+            terminalFontSize: cfgInfo.terminalFontSize
+          },
+          false
+        )
+      }
       setEnvironments(envs)
       setTransfers(xfers)
       const firstId = envs[0]?.id || 'local'
@@ -65,10 +75,15 @@ export default function App() {
     void init()
 
     const unsubs = [
-      window.multiplex.onConfigUpdated(({ environments: nextEnvs, theme: nextTheme }) => {
-        setEnvironments(nextEnvs, true)
-        if (nextTheme) setTheme(nextTheme, false)
-      }),
+      window.multiplex.onConfigUpdated(
+        ({ environments: nextEnvs, theme: nextTheme, editorFontSize, terminalFontSize }) => {
+          setEnvironments(nextEnvs, true)
+          if (nextTheme) setTheme(nextTheme, false)
+          if (editorFontSize || terminalFontSize) {
+            setFontSizes({ editorFontSize, terminalFontSize }, false)
+          }
+        }
+      ),
       window.multiplex.onEnvStatusChanged((env) => upsertEnvironment(env)),
       window.multiplex.onTerminalExit((terminalId, envId) => handleTerminalExited(terminalId, envId)),
       window.multiplex.onTerminalStatus((status) => setTerminalStatus(status)),
@@ -186,12 +201,62 @@ export default function App() {
         return
       }
 
-      // Cmd+W -> Close active editor tab
-      if (!e.shiftKey && !e.altKey && key === 'w' && state.activeFocusArea === 'editor' && state.activeTabId) {
+      // Cmd+Shift+T (anywhere) or Cmd+T (in terminal) -> New Terminal Tab
+      if (
+        !e.altKey &&
+        key === 't' &&
+        (e.shiftKey || state.activeFocusArea === 'terminal' || state.layoutMode === 'terminal')
+      ) {
         e.preventDefault()
         e.stopPropagation()
-        state.closeTab(state.activeTabId)
+        void state.createTerminalTab(state.activeEnvId)
         return
+      }
+
+      // Cmd+Shift+[ / Cmd+Shift+] -> Switch Terminal Tab
+      if (e.shiftKey && !e.altKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
+        e.preventDefault()
+        e.stopPropagation()
+        state.cycleTerminalTab(state.activeEnvId, e.code === 'BracketLeft' ? -1 : 1)
+        return
+      }
+
+      // Cmd+= / Cmd++ / Cmd+- / Cmd+0 -> Crisp Editor & Terminal Font Size Adjustment
+      if (!e.altKey && (e.code === 'Equal' || e.key === '+' || e.key === '=')) {
+        e.preventDefault()
+        e.stopPropagation()
+        state.adjustFontSize(1)
+        return
+      }
+      if (!e.altKey && (e.code === 'Minus' || e.key === '-')) {
+        e.preventDefault()
+        e.stopPropagation()
+        state.adjustFontSize(-1)
+        return
+      }
+      if (!e.altKey && !e.shiftKey && (e.code === 'Digit0' || e.key === '0')) {
+        e.preventDefault()
+        e.stopPropagation()
+        state.resetFontSizes()
+        return
+      }
+
+      // Cmd+W -> Close active terminal pane/tab OR active editor tab
+      if (!e.shiftKey && !e.altKey && key === 'w') {
+        if ((state.activeFocusArea === 'terminal' || state.layoutMode === 'terminal') && state.focusedTerminalId) {
+          e.preventDefault()
+          e.stopPropagation()
+          void state.closeTerminal(state.activeEnvId, state.focusedTerminalId)
+          return
+        }
+        const targetTabId =
+          state.editorFocusGroup === 1 && state.editorColumns === 2 ? state.secondaryTabId : state.activeTabId
+        if (state.activeFocusArea === 'editor' && targetTabId) {
+          e.preventDefault()
+          e.stopPropagation()
+          state.closeTab(targetTabId)
+          return
+        }
       }
 
       // Cmd+S -> Save active editor tab
@@ -233,7 +298,7 @@ export default function App() {
                         <select
                           value={secondaryEnvId}
                           onChange={(e) => setSecondaryEnvId(e.target.value)}
-                          className="rounded border px-1.5 py-0.5 text-[11px] font-mono outline-none"
+                          className="rounded border px-1.5 py-0.5 text-[12px] font-mono outline-none"
                           style={{
                             backgroundColor: 'var(--st-input)',
                             borderColor: 'var(--st-border-light)',
@@ -262,7 +327,7 @@ export default function App() {
           /* Unified Sublime Text 3 Layout: Single Clean Left Sidebar + Editor/Search/Terminal */
           <Allotment>
             {showSidebar && (
-              <Allotment.Pane preferredSize={250} minSize={185} maxSize={480}>
+              <Allotment.Pane preferredSize={275} minSize={200} maxSize={520}>
                 <FileTreePanel />
               </Allotment.Pane>
             )}
@@ -297,12 +362,12 @@ export default function App() {
       <TransferQueueDrawer />
 
       {toasts.length > 0 && (
-        <div className="fixed bottom-8 left-1/2 z-50 -translate-x-1/2 flex flex-col gap-1.5 pointer-events-none">
+        <div className="fixed bottom-9 left-1/2 z-50 -translate-x-1/2 flex flex-col gap-1.5 pointer-events-none">
           {toasts.map((t) => (
             <div
               key={t.id}
               onClick={() => dismissToast(t.id)}
-              className="pointer-events-auto cursor-pointer rounded border px-3 py-1 text-[11.5px] shadow-xl"
+              className="pointer-events-auto cursor-pointer rounded border px-3.5 py-1.5 text-[12.5px] shadow-xl"
               style={{
                 backgroundColor: 'var(--st-panel)',
                 borderColor:

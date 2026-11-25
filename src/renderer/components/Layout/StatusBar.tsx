@@ -17,6 +17,10 @@ export const StatusBar: React.FC = () => {
   const cursorInfo = useAppStore((s) => s.cursorInfo)
   const theme = useAppStore((s) => s.theme)
   const setTheme = useAppStore((s) => s.setTheme)
+  const editorFontSize = useAppStore((s) => s.editorFontSize)
+  const terminalFontSize = useAppStore((s) => s.terminalFontSize)
+  const adjustFontSize = useAppStore((s) => s.adjustFontSize)
+  const resetFontSizes = useAppStore((s) => s.resetFontSizes)
   const transfers = useAppStore((s) => s.transfers)
   const showTransferDrawer = useAppStore((s) => s.showTransferDrawer)
   const setShowTransferDrawer = useAppStore((s) => s.setShowTransferDrawer)
@@ -32,7 +36,7 @@ export const StatusBar: React.FC = () => {
 
   return (
     <footer
-      className="flex h-[22px] shrink-0 items-center justify-between border-t px-3 text-[11px] select-none"
+      className="flex h-[26px] shrink-0 items-center justify-between border-t px-3 text-[12px] select-none"
       style={{
         backgroundColor: 'var(--st-statusbar)',
         borderColor: 'var(--st-border)',
@@ -48,7 +52,7 @@ export const StatusBar: React.FC = () => {
 
         {branch && (
           <span className="flex items-center gap-1 font-mono" style={{ color: 'var(--st-text-muted)' }}>
-            <GitBranch className="h-3 w-3" />
+            <GitBranch className="h-3.5 w-3.5" />
             {branch}
           </span>
         )}
@@ -59,13 +63,13 @@ export const StatusBar: React.FC = () => {
             className="flex items-center gap-1 hover:opacity-90"
             style={{ color: 'var(--st-accent)' }}
           >
-            <UploadCloud className="h-3 w-3 animate-pulse" />
+            <UploadCloud className="h-3.5 w-3.5 animate-pulse" />
             <span>Transferring {runningTransfers.length}...</span>
           </button>
         )}
       </div>
 
-      <div className="flex items-center gap-4 font-mono text-[10.5px]">
+      <div className="flex items-center gap-4 font-mono text-[11.5px]">
         <span>
           Line {cursorInfo.line}, Column {cursorInfo.column}
         </span>
@@ -74,6 +78,32 @@ export const StatusBar: React.FC = () => {
         <span className="capitalize" style={{ color: 'var(--st-text-muted)' }}>
           {cursorInfo.language}
         </span>
+        <div className="flex items-center gap-0.5">
+          <button
+            onClick={() => adjustFontSize(-1)}
+            title="Decrease Font Size (⌘-)"
+            className="rounded px-1 hover:bg-white/10"
+            style={{ color: 'var(--st-text-muted)' }}
+          >
+            A-
+          </button>
+          <button
+            onClick={resetFontSizes}
+            title={`Reset Font Size (⌘0) · Editor ${editorFontSize}px / Terminal ${terminalFontSize}px`}
+            className="rounded px-1 hover:bg-white/10"
+            style={{ color: 'var(--st-text-muted)' }}
+          >
+            {editorFontSize}/{terminalFontSize}px
+          </button>
+          <button
+            onClick={() => adjustFontSize(1)}
+            title="Increase Font Size (⌘+)"
+            className="rounded px-1 hover:bg-white/10"
+            style={{ color: 'var(--st-text-muted)' }}
+          >
+            A+
+          </button>
+        </div>
         <button
           onClick={nextTheme}
           title="Switch Sublime Theme (Monokai / Mariana / Boxy Dark)"

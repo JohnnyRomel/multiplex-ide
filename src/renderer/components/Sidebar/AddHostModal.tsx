@@ -70,7 +70,7 @@ export const AddHostModal: React.FC = () => {
       onClick={() => setShow(false)}
     >
       <div
-        className="w-[430px] rounded border shadow-2xl overflow-hidden"
+        className="w-[470px] rounded border shadow-2xl overflow-hidden"
         style={{ backgroundColor: 'var(--st-panel)', borderColor: 'var(--st-border-light)' }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -78,7 +78,7 @@ export const AddHostModal: React.FC = () => {
           className="flex items-center justify-between px-4 py-2.5 border-b"
           style={{ backgroundColor: 'var(--st-titlebar)', borderColor: 'var(--st-border)' }}
         >
-          <span className="text-[12px] font-semibold">Add Workspace to Config</span>
+          <span className="text-[13px] font-semibold">Add Workspace to Config</span>
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -86,27 +86,27 @@ export const AddHostModal: React.FC = () => {
                 setShow(false)
                 void openConfigFile()
               }}
-              className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] hover:bg-white/10"
+              className="flex items-center gap-1 rounded px-2 py-0.5 text-[12px] hover:bg-white/10"
               style={{ color: 'var(--st-accent-blue)' }}
             >
-              <Settings className="h-3 w-3" /> Edit config.json
+              <Settings className="h-3.5 w-3.5" /> Edit config.json
             </button>
             <button onClick={() => setShow(false)} className="rounded p-1 hover:bg-white/10">
-              <X className="h-3.5 w-3.5" />
+              <X className="h-4 w-4" />
             </button>
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-4 space-y-3 text-[12px]">
+        <form onSubmit={handleSubmit} className="p-4 space-y-3 text-[13px]">
           {sshConfigHosts.length > 0 && (
             <div>
-              <label className="block mb-1 text-[11px]" style={{ color: 'var(--st-text-muted)' }}>
+              <label className="block mb-1 text-[12px]" style={{ color: 'var(--st-text-muted)' }}>
                 Pick from ~/.ssh/config (optional)
               </label>
               <select
                 defaultValue=""
                 onChange={(e) => applyPreset(e.target.value)}
-                className="w-full rounded border px-2 py-1.5 font-mono text-[11.5px] outline-none"
+                className="w-full rounded border px-2.5 py-1.5 font-mono text-[12.5px] outline-none"
                 style={{
                   backgroundColor: 'var(--st-input)',
                   borderColor: 'var(--st-border-light)',
@@ -125,19 +125,19 @@ export const AddHostModal: React.FC = () => {
 
           <div className="grid grid-cols-2 gap-2.5">
             <div>
-              <label className="block mb-1 text-[11px]" style={{ color: 'var(--st-text-muted)' }}>
+              <label className="block mb-1 text-[12px]" style={{ color: 'var(--st-text-muted)' }}>
                 Sidebar Label
               </label>
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="dev-server"
-                className="w-full rounded border px-2.5 py-1.5 outline-none font-mono text-[11.5px]"
+                className="w-full rounded border px-2.5 py-1.5 outline-none font-mono text-[12.5px]"
                 style={{ backgroundColor: 'var(--st-input)', borderColor: 'var(--st-border-light)' }}
               />
             </div>
             <div>
-              <label className="block mb-1 text-[11px]" style={{ color: 'var(--st-text-muted)' }}>
+              <label className="block mb-1 text-[12px]" style={{ color: 'var(--st-text-muted)' }}>
                 SSH Host Alias or IP *
               </label>
               <input
@@ -145,7 +145,7 @@ export const AddHostModal: React.FC = () => {
                 value={host}
                 onChange={(e) => setHost(e.target.value)}
                 placeholder="ssh-alias or 10.0.1.5"
-                className="w-full rounded border px-2.5 py-1.5 outline-none font-mono text-[11.5px]"
+                className="w-full rounded border px-2.5 py-1.5 outline-none font-mono text-[12.5px]"
                 style={{ backgroundColor: 'var(--st-input)', borderColor: 'var(--st-border-light)' }}
               />
             </div>
@@ -153,26 +153,26 @@ export const AddHostModal: React.FC = () => {
 
           <div className="grid grid-cols-2 gap-2.5">
             <div>
-              <label className="block mb-1 text-[11px]" style={{ color: 'var(--st-text-muted)' }}>
+              <label className="block mb-1 text-[12px]" style={{ color: 'var(--st-text-muted)' }}>
                 Default Directory
               </label>
               <input
                 value={defaultPath}
                 onChange={(e) => setDefaultPath(e.target.value)}
                 placeholder="~/workspace"
-                className="w-full rounded border px-2.5 py-1.5 outline-none font-mono text-[11.5px]"
+                className="w-full rounded border px-2.5 py-1.5 outline-none font-mono text-[12.5px]"
                 style={{ backgroundColor: 'var(--st-input)', borderColor: 'var(--st-border-light)' }}
               />
             </div>
             <div>
-              <label className="block mb-1 text-[11px]" style={{ color: 'var(--st-text-muted)' }}>
+              <label className="block mb-1 text-[12px]" style={{ color: 'var(--st-text-muted)' }}>
                 User (optional if in ssh_config)
               </label>
               <input
                 value={user}
                 onChange={(e) => setUser(e.target.value)}
                 placeholder="root / ubuntu"
-                className="w-full rounded border px-2.5 py-1.5 outline-none font-mono text-[11.5px]"
+                className="w-full rounded border px-2.5 py-1.5 outline-none font-mono text-[12.5px]"
                 style={{ backgroundColor: 'var(--st-input)', borderColor: 'var(--st-border-light)' }}
               />
             </div>
@@ -185,7 +185,7 @@ export const AddHostModal: React.FC = () => {
                 checked={useTmux}
                 onChange={(e) => setUseTmux(e.target.checked)}
               />
-              <span className="text-[11.5px]">Auto-attach tmux session</span>
+              <span className="text-[12.5px]">Auto-attach tmux session</span>
             </label>
 
             <div className="flex items-center gap-1.5">
@@ -194,7 +194,7 @@ export const AddHostModal: React.FC = () => {
                   key={c}
                   type="button"
                   onClick={() => setColor(c)}
-                  className="h-3.5 w-3.5 rounded-full"
+                  className="h-4 w-4 rounded-full"
                   style={{
                     backgroundColor: c,
                     outline: color === c ? '2px solid white' : 'none'
@@ -208,14 +208,14 @@ export const AddHostModal: React.FC = () => {
             <button
               type="button"
               onClick={() => setShow(false)}
-              className="rounded px-3 py-1 text-[11.5px] hover:bg-white/10"
+              className="rounded px-3.5 py-1.5 text-[12.5px] hover:bg-white/10"
               style={{ color: 'var(--st-text-muted)' }}
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="rounded px-3.5 py-1 text-[11.5px] font-semibold text-[#111]"
+              className="rounded px-4 py-1.5 text-[12.5px] font-semibold text-[#111]"
               style={{ backgroundColor: 'var(--st-accent)' }}
             >
               Add Workspace

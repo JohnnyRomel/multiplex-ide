@@ -14,6 +14,15 @@ export type TerminalSplitNode =
   | { type: 'leaf'; paneId: string; terminalId: string; title: string }
   | { type: 'split'; id: string; direction: 'horizontal' | 'vertical'; children: TerminalSplitNode[] }
 
+export interface TerminalTab {
+  id: string
+  envId: string
+  title: string
+  root: TerminalSplitNode
+  focusedPaneId?: string
+  hasUnread?: boolean
+}
+
 export interface EditorTab {
   id: string
   envId: string
@@ -51,6 +60,10 @@ export interface EditorCursorInfo {
 
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+function clampFontSize(size: number): number {
+  return Math.max(11, Math.min(24, Math.round(size)))
 }
 
 export function detectLanguageFromFilename(filePath: string): string {
@@ -172,6 +185,11 @@ export function collectTerminalIds(node: TerminalSplitNode | undefined | null): 
   return node.children.flatMap((c) => collectTerminalIds(c))
 }
 
+export function collectEnvTerminalIds(tabs: TerminalTab[] | undefined): string[] {
+  if (!tabs || tabs.length === 0) return []
+  return tabs.flatMap((t) => collectTerminalIds(t.root))
+}
+
 function findFirstLeaf(node: TerminalSplitNode | undefined | null): Extract<TerminalSplitNode, { type: 'leaf' }> | null {
   if (!node) return null
   if (node.type === 'leaf') return node
@@ -182,8 +200,23 @@ function findFirstLeaf(node: TerminalSplitNode | undefined | null): Extract<Term
   return null
 }
 
+function findLeafByPaneId(
+  node: TerminalSplitNode | undefined | null,
+  paneId?: string
+): Extract<TerminalSplitNode, { type: 'leaf' }> | null {
+  if (!node || !paneId) return null
+  if (node.type === 'leaf') return node.paneId === paneId ? node : null
+  for (const c of node.children) {
+    const found = findLeafByPaneId(c, paneId)
+    if (found) return found
+  }
+  return null
+}
+
 interface AppState {
   theme: EditorThemeId
+  editorFontSize: number
+  terminalFontSize: number
   configPath: string
   layoutMode: LayoutMode
   showSidebar: boolean
@@ -204,9 +237,10 @@ interface AppState {
   envGitStatus: Record<string, Record<string, string>>
   envNotifications: Record<string, TerminalNotification[]>
 
-  terminalTrees: Record<string, TerminalSplitNode | undefined>
+  // Multi-Tab Terminals per environment (each Tab also supports recursive split panes!)
+  terminalTabsByEnv: Record<string, TerminalTab[]>
+  activeTerminalTabByEnv: Record<string, string | undefined>
   terminalStatuses: Record<string, TerminalStatusEvent | undefined>
-  focusedPaneByEnv: Record<string, string | undefined>
   focusedTerminalId: string | null
   activeFocusArea: 'editor' | 'terminal'
 
@@ -227,6 +261,9 @@ interface AppState {
   toasts: ToastMessage[]
 
   setTheme: (theme: EditorThemeId, persist?: boolean) => void
+  setFontSizes: (sizes: { editorFontSize?: number; terminalFontSize?: number }, persist?: boolean) => void
+  adjustFontSize: (delta: number) => void
+  resetFontSizes: () => void
   setConfigPath: (path: string) => void
   openConfigFile: () => Promise<void>
   setLayoutMode: (mode: LayoutMode) => void
@@ -253,12 +290,17 @@ interface AppState {
   clearEnvNotifications: (envId: string) => void
 
   ensureTerminalForEnv: (envId: string, cwd?: string) => Promise<string | null>
+  createTerminalTab: (envId: string, opts?: { cwd?: string; title?: string }) => Promise<string | null>
+  setActiveTerminalTab: (envId: string, tabId: string) => void
+  cycleTerminalTab: (envId: string, delta: 1 | -1) => void
+  renameTerminalTab: (envId: string, tabId: string, title: string) => void
+  closeTerminalTab: (envId: string, tabId: string) => Promise<void>
   splitTerminal: (envId: string, direction: 'horizontal' | 'vertical', cwd?: string) => Promise<void>
   closeTerminal: (envId: string, terminalId: string) => Promise<void>
   reconnectTerminal: (terminalId: string, forceReset?: boolean) => Promise<void>
   setTerminalStatus: (status: TerminalStatusEvent) => void
   handleTerminalExited: (terminalId: string, envId: string) => void
-  setFocusedPane: (envId: string, paneId: string, terminalId: string) => void
+  setFocusedPane: (envId: string, tabId: string, paneId: string, terminalId: string) => void
 
   openFile: (envId: string, filePath: string, pos?: { line: number; column: number }, group?: 0 | 1) => Promise<void>
   openDiffTab: (origTabId: string, modTabId: string) => void
@@ -290,8 +332,13 @@ interface AppState {
   dismissToast: (id: string) => void
 }
 
+const storedEditorFont = Number(localStorage.getItem('multiplex-editor-font'))
+const storedTermFont = Number(localStorage.getItem('multiplex-terminal-font'))
+
 export const useAppStore = create<AppState>((set, get) => ({
   theme: (localStorage.getItem('multiplex-theme') as EditorThemeId) || 'monokai',
+  editorFontSize: Number.isFinite(storedEditorFont) && storedEditorFont >= 11 ? clampFontSize(storedEditorFont) : 15,
+  terminalFontSize: Number.isFinite(storedTermFont) && storedTermFont >= 11 ? clampFontSize(storedTermFont) : 14,
   configPath: '',
   layoutMode: 'ide',
   showSidebar: true,
@@ -312,9 +359,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   envGitStatus: {},
   envNotifications: {},
 
-  terminalTrees: {},
+  terminalTabsByEnv: {},
+  activeTerminalTabByEnv: {},
   terminalStatuses: {},
-  focusedPaneByEnv: {},
   focusedTerminalId: null,
   activeFocusArea: 'editor',
 
@@ -342,6 +389,34 @@ export const useAppStore = create<AppState>((set, get) => ({
       const firstId = get().environments[0]?.id || 'local'
       void window.multiplex.updateEnvSettings(firstId, { theme })
     }
+  },
+
+  setFontSizes: (sizes, persist = true) => {
+    const nextEd = sizes.editorFontSize !== undefined ? clampFontSize(sizes.editorFontSize) : get().editorFontSize
+    const nextTerm =
+      sizes.terminalFontSize !== undefined ? clampFontSize(sizes.terminalFontSize) : get().terminalFontSize
+    localStorage.setItem('multiplex-editor-font', String(nextEd))
+    localStorage.setItem('multiplex-terminal-font', String(nextTerm))
+    set({ editorFontSize: nextEd, terminalFontSize: nextTerm })
+    if (persist) {
+      const firstId = get().environments[0]?.id || 'local'
+      void window.multiplex.updateEnvSettings(firstId, {
+        editorFontSize: nextEd,
+        terminalFontSize: nextTerm
+      })
+    }
+  },
+
+  adjustFontSize: (delta) => {
+    const s = get()
+    s.setFontSizes({
+      editorFontSize: s.editorFontSize + delta,
+      terminalFontSize: s.terminalFontSize + delta
+    })
+  },
+
+  resetFontSizes: () => {
+    get().setFontSizes({ editorFontSize: 15, terminalFontSize: 14 })
   },
 
   setConfigPath: (configPath) => set({ configPath }),
@@ -436,7 +511,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const nextNotifs = { ...s.envNotifications }
       delete nextNotifs[envId]
-      const leaf = findFirstLeaf(s.terminalTrees[envId])
+      const tabs = s.terminalTabsByEnv[envId] || []
+      const activeTabId = s.activeTerminalTabByEnv[envId] || tabs[0]?.id
+      const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0]
+      const leaf = findLeafByPaneId(activeTab?.root, activeTab?.focusedPaneId) || findFirstLeaf(activeTab?.root)
       return {
         activeEnvId: envId,
         envNotifications: nextNotifs,
@@ -444,7 +522,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     })
     const state = get()
-    if (!state.terminalTrees[envId]) {
+    if ((state.terminalTabsByEnv[envId] || []).length === 0) {
       void state.ensureTerminalForEnv(envId)
     }
   },
@@ -466,9 +544,24 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   pushNotification: (n) =>
     set((s) => {
-      if (n.envId === s.activeEnvId && s.showTerminalPanel) return s
+      const tabs = s.terminalTabsByEnv[n.envId] || []
+      const activeTabId = s.activeTerminalTabByEnv[n.envId]
+      const updatedTabs = tabs.map((t) => {
+        const ids = collectTerminalIds(t.root)
+        if (ids.includes(n.terminalId) && (n.envId !== s.activeEnvId || t.id !== activeTabId || !s.showTerminalPanel)) {
+          return { ...t, hasUnread: true }
+        }
+        return t
+      })
+
+      if (n.envId === s.activeEnvId && s.showTerminalPanel) {
+        return {
+          terminalTabsByEnv: { ...s.terminalTabsByEnv, [n.envId]: updatedTabs }
+        }
+      }
       const existing = s.envNotifications[n.envId] || []
       return {
+        terminalTabsByEnv: { ...s.terminalTabsByEnv, [n.envId]: updatedTabs },
         envNotifications: {
           ...s.envNotifications,
           [n.envId]: [...existing.slice(-9), n]
@@ -484,37 +577,133 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
 
   ensureTerminalForEnv: async (envId, cwd) => {
-    const existingTree = get().terminalTrees[envId]
-    if (existingTree) {
-      const first = findFirstLeaf(existingTree)
+    const tabs = get().terminalTabsByEnv[envId] || []
+    if (tabs.length > 0) {
+      const activeId = get().activeTerminalTabByEnv[envId] || tabs[0].id
+      const tab = tabs.find((t) => t.id === activeId) || tabs[0]
+      const first = findFirstLeaf(tab.root)
       return first?.terminalId ?? null
     }
+    return get().createTerminalTab(envId, { cwd })
+  },
+
+  createTerminalTab: async (envId, opts) => {
     const env = get().environments.find((e) => e.id === envId)
     if (!env) return null
+
+    const existingTabs = get().terminalTabsByEnv[envId] || []
+    const nextNum = existingTabs.length + 1
+    const defaultTitle = opts?.title || `${env.kind === 'local' ? 'zsh' : env.name} #${nextNum}`
 
     try {
       const info = await window.multiplex.createTerminal({
         envId,
-        cwd: cwd || get().envRootPaths[envId] || env.defaultPath,
+        cwd: opts?.cwd || get().envRootPaths[envId] || env.defaultPath,
+        title: defaultTitle,
         useTmux: env.useTmux
       })
       const paneId = makeId('pane')
+      const tabId = makeId('ttab')
       const leaf: Extract<TerminalSplitNode, { type: 'leaf' }> = {
         type: 'leaf',
         paneId,
         terminalId: info.id,
-        title: info.title
+        title: defaultTitle
       }
+      const newTab: TerminalTab = {
+        id: tabId,
+        envId,
+        title: defaultTitle,
+        root: leaf,
+        focusedPaneId: paneId
+      }
+
       set((s) => ({
-        terminalTrees: { ...s.terminalTrees, [envId]: leaf },
-        focusedPaneByEnv: { ...s.focusedPaneByEnv, [envId]: paneId },
-        focusedTerminalId: s.activeEnvId === envId ? info.id : s.focusedTerminalId
+        showTerminalPanel: true,
+        terminalTabsByEnv: {
+          ...s.terminalTabsByEnv,
+          [envId]: [...(s.terminalTabsByEnv[envId] || []), newTab]
+        },
+        activeTerminalTabByEnv: {
+          ...s.activeTerminalTabByEnv,
+          [envId]: tabId
+        },
+        focusedTerminalId: s.activeEnvId === envId ? info.id : s.focusedTerminalId,
+        activeFocusArea: s.activeEnvId === envId ? 'terminal' : s.activeFocusArea
       }))
       return info.id
     } catch (err: any) {
-      get().addToast('error', `Failed to open terminal: ${err?.message || err}`)
+      get().addToast('error', `Failed to open terminal tab: ${err?.message || err}`)
       return null
     }
+  },
+
+  setActiveTerminalTab: (envId, tabId) =>
+    set((s) => {
+      const tabs = (s.terminalTabsByEnv[envId] || []).map((t) =>
+        t.id === tabId ? { ...t, hasUnread: false } : t
+      )
+      const target = tabs.find((t) => t.id === tabId)
+      const leaf = findLeafByPaneId(target?.root, target?.focusedPaneId) || findFirstLeaf(target?.root)
+      return {
+        terminalTabsByEnv: { ...s.terminalTabsByEnv, [envId]: tabs },
+        activeTerminalTabByEnv: { ...s.activeTerminalTabByEnv, [envId]: tabId },
+        focusedTerminalId: leaf?.terminalId ?? s.focusedTerminalId,
+        activeFocusArea: 'terminal'
+      }
+    }),
+
+  cycleTerminalTab: (envId, delta) => {
+    const s = get()
+    const tabs = s.terminalTabsByEnv[envId] || []
+    if (tabs.length <= 1) return
+    const curId = s.activeTerminalTabByEnv[envId] || tabs[0].id
+    const idx = Math.max(0, tabs.findIndex((t) => t.id === curId))
+    const nextIdx = (idx + delta + tabs.length) % tabs.length
+    s.setActiveTerminalTab(envId, tabs[nextIdx].id)
+  },
+
+  renameTerminalTab: (envId, tabId, title) =>
+    set((s) => {
+      const trimmed = title.trim()
+      if (!trimmed) return s
+      const tabs = (s.terminalTabsByEnv[envId] || []).map((t) =>
+        t.id === tabId ? { ...t, title: trimmed } : t
+      )
+      return {
+        terminalTabsByEnv: { ...s.terminalTabsByEnv, [envId]: tabs }
+      }
+    }),
+
+  closeTerminalTab: async (envId, tabId) => {
+    const tabs = get().terminalTabsByEnv[envId] || []
+    const tab = tabs.find((t) => t.id === tabId)
+    if (!tab) return
+    const termIds = collectTerminalIds(tab.root)
+    await Promise.all(termIds.map((id) => window.multiplex.killTerminal(id)))
+
+    set((s) => {
+      const curTabs = s.terminalTabsByEnv[envId] || []
+      const idx = curTabs.findIndex((t) => t.id === tabId)
+      const nextTabs = curTabs.filter((t) => t.id !== tabId)
+      const nextActive =
+        s.activeTerminalTabByEnv[envId] === tabId
+          ? nextTabs[Math.min(idx, nextTabs.length - 1)]?.id
+          : s.activeTerminalTabByEnv[envId]
+      const nextActiveTab = nextTabs.find((t) => t.id === nextActive)
+      const nextLeaf = findFirstLeaf(nextActiveTab?.root)
+      const nextStatuses = { ...s.terminalStatuses }
+      for (const id of termIds) delete nextStatuses[id]
+      return {
+        terminalTabsByEnv: { ...s.terminalTabsByEnv, [envId]: nextTabs },
+        activeTerminalTabByEnv: { ...s.activeTerminalTabByEnv, [envId]: nextActive },
+        terminalStatuses: nextStatuses,
+        focusedTerminalId:
+          s.focusedTerminalId && termIds.includes(s.focusedTerminalId)
+            ? nextLeaf?.terminalId ?? null
+            : s.focusedTerminalId
+      }
+    })
   },
 
   splitTerminal: async (envId, direction, cwd) => {
@@ -522,11 +711,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const env = s.environments.find((e) => e.id === envId)
     if (!env) return
 
-    const existingTree = s.terminalTrees[envId]
-    if (!existingTree) {
-      await get().ensureTerminalForEnv(envId, cwd)
+    const tabs = s.terminalTabsByEnv[envId] || []
+    if (tabs.length === 0) {
+      await get().createTerminalTab(envId, { cwd })
       return
     }
+
+    const activeTabId = s.activeTerminalTabByEnv[envId] || tabs[0].id
+    const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0]
 
     try {
       const info = await window.multiplex.createTerminal({
@@ -541,13 +733,19 @@ export const useAppStore = create<AppState>((set, get) => ({
         terminalId: info.id,
         title: info.title
       }
-      const targetPaneId = s.focusedPaneByEnv[envId] || findFirstLeaf(existingTree)?.paneId || ''
-      const updated = insertSplitLeaf(existingTree, targetPaneId, direction, newLeaf)
+      const targetPaneId = activeTab.focusedPaneId || findFirstLeaf(activeTab.root)?.paneId || ''
+      const updatedRoot = insertSplitLeaf(activeTab.root, targetPaneId, direction, newLeaf)
+
       set((st) => ({
         showTerminalPanel: true,
-        terminalTrees: { ...st.terminalTrees, [envId]: updated },
-        focusedPaneByEnv: { ...st.focusedPaneByEnv, [envId]: paneId },
-        focusedTerminalId: info.id
+        terminalTabsByEnv: {
+          ...st.terminalTabsByEnv,
+          [envId]: (st.terminalTabsByEnv[envId] || []).map((t) =>
+            t.id === activeTab.id ? { ...t, root: updatedRoot, focusedPaneId: paneId } : t
+          )
+        },
+        focusedTerminalId: info.id,
+        activeFocusArea: 'terminal'
       }))
     } catch (err: any) {
       get().addToast('error', `Split terminal failed: ${err?.message || err}`)
@@ -570,23 +768,54 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   handleTerminalExited: (terminalId, envId) =>
     set((s) => {
-      const tree = s.terminalTrees[envId]
-      if (!tree) return s
-      const nextTree = removeSplitLeaf(tree, terminalId)
-      const nextLeaf = findFirstLeaf(nextTree)
+      const tabs = s.terminalTabsByEnv[envId] || []
+      if (tabs.length === 0) return s
+
+      const nextTabs: TerminalTab[] = []
+      let removedTabIdx = -1
+      let removedTabId: string | null = null
+
+      tabs.forEach((tab, idx) => {
+        const nextRoot = removeSplitLeaf(tab.root, terminalId)
+        if (!nextRoot) {
+          removedTabIdx = idx
+          removedTabId = tab.id
+        } else if (nextRoot !== tab.root) {
+          const nextLeaf = findLeafByPaneId(nextRoot, tab.focusedPaneId) || findFirstLeaf(nextRoot)
+          nextTabs.push({ ...tab, root: nextRoot, focusedPaneId: nextLeaf?.paneId })
+        } else {
+          nextTabs.push(tab)
+        }
+      })
+
+      let nextActiveTabId = s.activeTerminalTabByEnv[envId]
+      if (removedTabId && nextActiveTabId === removedTabId) {
+        nextActiveTabId = nextTabs[Math.min(removedTabIdx, nextTabs.length - 1)]?.id
+      }
+
+      const activeTab = nextTabs.find((t) => t.id === nextActiveTabId) || nextTabs[0]
+      const nextLeaf = findLeafByPaneId(activeTab?.root, activeTab?.focusedPaneId) || findFirstLeaf(activeTab?.root)
+
       const nextStatuses = { ...s.terminalStatuses }
       delete nextStatuses[terminalId]
+
       return {
-        terminalTrees: { ...s.terminalTrees, [envId]: nextTree ?? undefined },
+        terminalTabsByEnv: { ...s.terminalTabsByEnv, [envId]: nextTabs },
+        activeTerminalTabByEnv: { ...s.activeTerminalTabByEnv, [envId]: nextActiveTabId },
         terminalStatuses: nextStatuses,
-        focusedPaneByEnv: { ...s.focusedPaneByEnv, [envId]: nextLeaf?.paneId },
         focusedTerminalId: s.focusedTerminalId === terminalId ? nextLeaf?.terminalId ?? null : s.focusedTerminalId
       }
     }),
 
-  setFocusedPane: (envId, paneId, terminalId) =>
+  setFocusedPane: (envId, tabId, paneId, terminalId) =>
     set((s) => ({
-      focusedPaneByEnv: { ...s.focusedPaneByEnv, [envId]: paneId },
+      terminalTabsByEnv: {
+        ...s.terminalTabsByEnv,
+        [envId]: (s.terminalTabsByEnv[envId] || []).map((t) =>
+          t.id === tabId ? { ...t, focusedPaneId: paneId, hasUnread: false } : t
+        )
+      },
+      activeTerminalTabByEnv: { ...s.activeTerminalTabByEnv, [envId]: tabId },
       focusedTerminalId: terminalId,
       activeFocusArea: 'terminal'
     })),
@@ -727,7 +956,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         )
       }))
       const isCfg = get().configPath && tab.path === get().configPath
-      get().addToast('success', isCfg ? 'Saved config.json — Workspaces reloaded!' : `Saved ${tab.name}`)
+      get().addToast('success', isCfg ? 'Saved config — Workspaces reloaded!' : `Saved ${tab.name}`)
       return true
     } catch (err: any) {
       get().addToast('error', `Save failed: ${err?.message || err}`)

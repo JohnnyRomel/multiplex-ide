@@ -241,16 +241,16 @@ export const QuickOpenModal: React.FC = () => {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[36px] bg-black/30"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-[42px] bg-black/30"
       onClick={() => setShow(false)}
     >
       <div
-        className="w-[640px] max-w-[92vw] rounded-b border shadow-2xl overflow-hidden"
+        className="w-[700px] max-w-[92vw] rounded-b border shadow-2xl overflow-hidden"
         style={{ backgroundColor: 'var(--st-panel)', borderColor: 'var(--st-border-light)' }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Sublime Goto Anything Input */}
-        <div className="flex items-center gap-2 p-2 border-b" style={{ borderColor: 'var(--st-border)' }}>
+        <div className="flex items-center gap-2 p-2.5 border-b" style={{ borderColor: 'var(--st-border)' }}>
           <div className="relative flex-1 flex items-center">
             <input
               ref={inputRef}
@@ -273,7 +273,7 @@ export const QuickOpenModal: React.FC = () => {
                 }
               }}
               placeholder="Goto Anything — e.g. feature_handler.cpp or file.py:42 ..."
-              className="w-full rounded border pl-2.5 pr-7 py-1.5 font-mono text-[13px] outline-none"
+              className="w-full rounded border pl-3 pr-8 py-2 font-mono text-[14px] outline-none"
               style={{
                 backgroundColor: 'var(--st-input)',
                 borderColor: 'var(--st-border-light)',
@@ -282,7 +282,7 @@ export const QuickOpenModal: React.FC = () => {
             />
             {loading && (
               <Loader2
-                className="absolute right-2 h-3.5 w-3.5 animate-spin"
+                className="absolute right-2.5 h-4 w-4 animate-spin"
                 style={{ color: 'var(--st-accent)' }}
               />
             )}
@@ -292,25 +292,25 @@ export const QuickOpenModal: React.FC = () => {
             type="button"
             onClick={() => setAllEnvs((v) => !v)}
             title="Toggle between Active Workspace and All Workspaces"
-            className="flex items-center gap-1 rounded border px-2.5 py-1.5 text-[11px] font-mono shrink-0"
+            className="flex items-center gap-1.5 rounded border px-3 py-2 text-[12px] font-mono shrink-0"
             style={{
               backgroundColor: allEnvs ? 'var(--st-sidebar-active)' : 'var(--st-input)',
               borderColor: allEnvs ? 'var(--st-accent)' : 'var(--st-border-light)',
               color: allEnvs ? 'var(--st-text)' : 'var(--st-text-muted)'
             }}
           >
-            <Globe className="h-3 w-3" />
+            <Globe className="h-3.5 w-3.5" />
             <span>{allEnvs ? 'All Workspaces' : activeEnv?.name || 'Current'}</span>
           </button>
         </div>
 
         {/* File Results */}
-        <div ref={listRef} className="max-h-[390px] overflow-y-auto py-0.5">
+        <div ref={listRef} className="max-h-[440px] overflow-y-auto py-0.5">
           {ranked.length === 0 ? (
-            <div className="px-4 py-6 text-center text-[12px] space-y-2" style={{ color: 'var(--st-text-dim)' }}>
+            <div className="px-4 py-6 text-center text-[13px] space-y-2" style={{ color: 'var(--st-text-dim)' }}>
               {loading ? (
                 <div className="flex items-center justify-center gap-2">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <Loader2 className="h-4 w-4 animate-spin" />
                   <span>Searching {activeRoot}...</span>
                 </div>
               ) : activeEnv?.kind === 'ssh' && activeEnv.status !== 'connected' ? (
@@ -334,7 +334,7 @@ export const QuickOpenModal: React.FC = () => {
                         await ensureTerminalForEnv(activeEnv.id)
                       }
                     }}
-                    className="rounded px-3 py-1 text-[11px] font-medium text-[#111]"
+                    className="rounded px-3.5 py-1.5 text-[12px] font-medium text-[#111]"
                     style={{ backgroundColor: 'var(--st-accent)' }}
                   >
                     Connect {activeEnv.name}
@@ -353,27 +353,27 @@ export const QuickOpenModal: React.FC = () => {
                   key={`${item.envId}::${item.filePath}`}
                   onMouseEnter={() => setSelectedIdx(idx)}
                   onClick={() => handleSelect(item)}
-                  className="flex items-baseline justify-between gap-3 px-3 py-1.5 cursor-pointer"
+                  className="flex items-baseline justify-between gap-3 px-3.5 py-2 cursor-pointer"
                   style={{
                     backgroundColor: selected ? 'var(--st-sidebar-active)' : 'transparent'
                   }}
                 >
                   <div className="flex items-baseline gap-2.5 min-w-0">
-                    <span className="text-[12.5px] font-medium shrink-0" style={{ color: 'var(--st-text)' }}>
+                    <span className="text-[13.5px] font-medium shrink-0" style={{ color: 'var(--st-text)' }}>
                       <HighlightedText text={item.name} query={pathQuery} />
                       {targetLine ? (
-                        <span className="ml-1 font-mono text-[11px]" style={{ color: 'var(--st-accent)' }}>
+                        <span className="ml-1 font-mono text-[12px]" style={{ color: 'var(--st-accent)' }}>
                           :{targetLine}
                         </span>
                       ) : null}
                     </span>
-                    <span className="truncate font-mono text-[11px]" style={{ color: 'var(--st-text-dim)' }}>
+                    <span className="truncate font-mono text-[12px]" style={{ color: 'var(--st-text-dim)' }}>
                       <HighlightedText text={item.relativePath} query={pathQuery} />
                     </span>
                   </div>
 
                   {env && (allEnvs || env.kind === 'ssh') && (
-                    <span className="font-mono text-[10px] shrink-0" style={{ color: 'var(--st-text-muted)' }}>
+                    <span className="font-mono text-[11px] shrink-0" style={{ color: 'var(--st-text-muted)' }}>
                       {env.name}
                     </span>
                   )}
@@ -384,7 +384,7 @@ export const QuickOpenModal: React.FC = () => {
         </div>
 
         <div
-          className="flex items-center justify-between px-3 py-1 border-t text-[10.5px] font-mono"
+          className="flex items-center justify-between px-3.5 py-1.5 border-t text-[11.5px] font-mono"
           style={{ borderColor: 'var(--st-border)', color: 'var(--st-text-dim)', backgroundColor: 'var(--st-titlebar)' }}
         >
           <span className="truncate">

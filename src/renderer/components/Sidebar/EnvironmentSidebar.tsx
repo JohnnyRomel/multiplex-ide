@@ -11,7 +11,7 @@ import {
   Trash2
 } from 'lucide-react'
 import type { Environment } from '@shared/types'
-import { collectTerminalIds, useAppStore } from '@renderer/stores/useAppStore'
+import { collectEnvTerminalIds, useAppStore } from '@renderer/stores/useAppStore'
 
 /**
  * Clean, Sublime Text 3-style WORKSPACES section.
@@ -21,7 +21,7 @@ import { collectTerminalIds, useAppStore } from '@renderer/stores/useAppStore'
 export const WorkspaceListSection: React.FC = () => {
   const environments = useAppStore((s) => s.environments)
   const activeEnvId = useAppStore((s) => s.activeEnvId)
-  const terminalTrees = useAppStore((s) => s.terminalTrees)
+  const terminalTabsByEnv = useAppStore((s) => s.terminalTabsByEnv)
   const envNotifications = useAppStore((s) => s.envNotifications)
   const envRootPaths = useAppStore((s) => s.envRootPaths)
 
@@ -59,7 +59,7 @@ export const WorkspaceListSection: React.FC = () => {
     } else {
       setActiveEnv(env.id)
       const res = await window.multiplex.connectEnvironment(env.id)
-      const existingTermIds = collectTerminalIds(useAppStore.getState().terminalTrees[env.id])
+      const existingTermIds = collectEnvTerminalIds(useAppStore.getState().terminalTabsByEnv[env.id])
       if (res.ok) {
         addToast('success', `Connected to ${env.name}`)
         // Re-attach any disconnected panes in-place without clearing scrollback!
@@ -176,7 +176,7 @@ export const WorkspaceListSection: React.FC = () => {
         <div>
           {environments.map((env, idx) => {
             const isActive = env.id === activeEnvId
-            const termCount = collectTerminalIds(terminalTrees[env.id]).length
+            const termCount = collectEnvTerminalIds(terminalTabsByEnv[env.id]).length
             const notifs = envNotifications[env.id] || []
             const hasAttention = notifs.length > 0
             const isDragOver = dragOverEnvId === env.id
@@ -202,7 +202,7 @@ export const WorkspaceListSection: React.FC = () => {
                 }}
                 onDragLeave={() => setDragOverEnvId((p) => (p === env.id ? null : p))}
                 onDrop={(e) => void handleDropOnEnv(e, env)}
-                className="group relative flex h-[26px] items-center justify-between gap-1.5 pl-4 pr-2 cursor-pointer text-[12px]"
+                className="group relative flex h-[29px] items-center justify-between gap-1.5 pl-4 pr-2 cursor-pointer text-[13px]"
                 style={{
                   backgroundColor: isDragOver
                     ? 'rgba(166, 226, 46, 0.18)'

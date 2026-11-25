@@ -168,6 +168,8 @@ export function loadSystemSshConfig(configPath?: string): SshConfigHostSummary[]
 export function createDefaultConfig(): MultiplexConfigFile {
   return {
     theme: 'monokai',
+    editorFontSize: 15,
+    terminalFontSize: 14,
     showAllSshConfigHosts: false,
     extraPathDirs: [],
     workspaces: [
@@ -243,6 +245,14 @@ export class EnvironmentRegistry {
     return this.config.theme || 'monokai'
   }
 
+  getEditorFontSize(): number {
+    return this.config.editorFontSize || 15
+  }
+
+  getTerminalFontSize(): number {
+    return this.config.terminalFontSize || 14
+  }
+
   getExtraPathDirs(): string[] {
     return (this.config.extraPathDirs || []).map(expandLocalTilde)
   }
@@ -259,6 +269,8 @@ export class EnvironmentRegistry {
         if (Array.isArray(parsed.workspaces) && parsed.workspaces.length > 0) {
           this.config = {
             theme: parsed.theme || 'monokai',
+            editorFontSize: typeof parsed.editorFontSize === 'number' ? parsed.editorFontSize : 15,
+            terminalFontSize: typeof parsed.terminalFontSize === 'number' ? parsed.terminalFontSize : 14,
             showAllSshConfigHosts: Boolean(parsed.showAllSshConfigHosts),
             extraPathDirs: Array.isArray(parsed.extraPathDirs) ? parsed.extraPathDirs : [],
             workspaces: parsed.workspaces
@@ -285,11 +297,18 @@ export class EnvironmentRegistry {
     }
   }
 
-  reloadFromDisk(): { environments: Environment[]; theme: EditorThemeId } {
+  reloadFromDisk(): {
+    environments: Environment[]
+    theme: EditorThemeId
+    editorFontSize: number
+    terminalFontSize: number
+  } {
     this.loadOrSeedConfig()
     return {
       environments: this.refresh(),
-      theme: this.getTheme()
+      theme: this.getTheme(),
+      editorFontSize: this.getEditorFontSize(),
+      terminalFontSize: this.getTerminalFontSize()
     }
   }
 
@@ -439,10 +458,24 @@ export class EnvironmentRegistry {
     envId: string,
     patch: Partial<Pick<Environment, 'defaultPath' | 'useTmux' | 'tmuxSessionName' | 'pinned' | 'color'>> & {
       theme?: EditorThemeId
+      editorFontSize?: number
+      terminalFontSize?: number
     }
   ): Environment | undefined {
+    let dirtyGlobal = false
     if (patch.theme) {
       this.config.theme = patch.theme
+      dirtyGlobal = true
+    }
+    if (typeof patch.editorFontSize === 'number') {
+      this.config.editorFontSize = patch.editorFontSize
+      dirtyGlobal = true
+    }
+    if (typeof patch.terminalFontSize === 'number') {
+      this.config.terminalFontSize = patch.terminalFontSize
+      dirtyGlobal = true
+    }
+    if (dirtyGlobal) {
       this.saveConfig()
     }
     const existing = this.environments.get(envId)

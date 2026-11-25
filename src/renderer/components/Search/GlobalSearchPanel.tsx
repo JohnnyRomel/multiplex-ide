@@ -89,7 +89,7 @@ export const GlobalSearchPanel: React.FC = () => {
       type="button"
       onClick={onClick}
       title={title}
-      className="h-[24px] w-[26px] rounded-sm border font-mono text-[11px] transition-colors"
+      className="h-[26px] w-[28px] rounded-sm border font-mono text-[12px] transition-colors"
       style={{
         backgroundColor: active ? 'var(--st-sidebar-active)' : 'var(--st-input)',
         borderColor: active ? 'var(--st-accent)' : 'var(--st-border-light)',
@@ -119,7 +119,7 @@ export const GlobalSearchPanel: React.FC = () => {
             {stToggle(wholeWord, '\\b', 'Whole word', () => setWholeWord((v) => !v))}
           </div>
 
-          <span className="w-[42px] text-right text-[11px] shrink-0" style={{ color: 'var(--st-text-muted)' }}>
+          <span className="w-[48px] text-right text-[12px] shrink-0" style={{ color: 'var(--st-text-muted)' }}>
             Find:
           </span>
 
@@ -131,7 +131,7 @@ export const GlobalSearchPanel: React.FC = () => {
               if (e.key === 'Escape') setShowSearchPanel(false)
             }}
             placeholder="Find text across files (Enter to search)..."
-            className="flex-1 rounded-sm border px-2 py-1 font-mono text-[12px] outline-none"
+            className="flex-1 rounded-sm border px-2.5 py-1 font-mono text-[13px] outline-none"
             style={{
               backgroundColor: 'var(--st-input)',
               borderColor: 'var(--st-border-light)',
@@ -143,19 +143,19 @@ export const GlobalSearchPanel: React.FC = () => {
             <button
               type="button"
               onClick={cancelGlobalSearch}
-              className="flex items-center gap-1 rounded-sm border px-3 py-1 text-[11px]"
+              className="flex items-center gap-1 rounded-sm border px-3 py-1 text-[12px]"
               style={{
                 backgroundColor: 'var(--st-sidebar-active)',
                 borderColor: 'var(--st-red)',
                 color: 'var(--st-red)'
               }}
             >
-              <Square className="h-2.5 w-2.5" /> Cancel
+              <Square className="h-3 w-3" /> Cancel
             </button>
           ) : (
             <button
               type="submit"
-              className="rounded-sm border px-3.5 py-1 text-[11px] font-medium hover:brightness-110"
+              className="rounded-sm border px-3.5 py-1 text-[12px] font-medium hover:brightness-110"
               style={{
                 backgroundColor: 'var(--st-sidebar-active)',
                 borderColor: 'var(--st-border-light)',
@@ -172,7 +172,7 @@ export const GlobalSearchPanel: React.FC = () => {
             className="rounded p-1 hover:bg-white/10"
             style={{ color: 'var(--st-text-dim)' }}
           >
-            <X className="h-3.5 w-3.5" />
+            <X className="h-4 w-4" />
           </button>
         </div>
 
@@ -186,7 +186,7 @@ export const GlobalSearchPanel: React.FC = () => {
                   key={env.id}
                   type="button"
                   onClick={() => toggleTargetEnv(env.id)}
-                  className="flex items-center gap-1 rounded-sm border px-2 py-0.5 font-mono text-[10.5px]"
+                  className="flex items-center gap-1.5 rounded-sm border px-2.5 py-0.5 font-mono text-[11.5px]"
                   style={{
                     backgroundColor: selected ? 'var(--st-sidebar-active)' : 'var(--st-input)',
                     borderColor: selected ? env.color : 'var(--st-border)',
@@ -195,7 +195,7 @@ export const GlobalSearchPanel: React.FC = () => {
                   title={`Include ${env.name} in search`}
                 >
                   <span
-                    className="h-1.5 w-1.5 rounded-full"
+                    className="h-2 w-2 rounded-full"
                     style={{
                       backgroundColor:
                         env.status === 'connected' ? 'var(--st-green)' : 'var(--st-text-dim)'
@@ -207,7 +207,7 @@ export const GlobalSearchPanel: React.FC = () => {
             })}
           </div>
 
-          <span className="w-[42px] text-right text-[11px] shrink-0" style={{ color: 'var(--st-text-muted)' }}>
+          <span className="w-[48px] text-right text-[12px] shrink-0" style={{ color: 'var(--st-text-muted)' }}>
             Where:
           </span>
 
@@ -216,7 +216,7 @@ export const GlobalSearchPanel: React.FC = () => {
               value={wherePath}
               onChange={(e) => setWherePath(e.target.value)}
               placeholder="Directory path..."
-              className="flex-1 min-w-[160px] rounded-sm border px-2 py-0.5 font-mono text-[11px] outline-none"
+              className="flex-1 min-w-[160px] rounded-sm border px-2.5 py-1 font-mono text-[12px] outline-none"
               style={{
                 backgroundColor: 'var(--st-input)',
                 borderColor: 'var(--st-border-light)',
@@ -224,7 +224,7 @@ export const GlobalSearchPanel: React.FC = () => {
               }}
             />
           ) : (
-            <span className="flex-1 font-mono text-[11px]" style={{ color: 'var(--st-text-dim)' }}>
+            <span className="flex-1 font-mono text-[12px]" style={{ color: 'var(--st-text-dim)' }}>
               Searching {selectedIds.length} workspace roots simultaneously
             </span>
           )}
@@ -233,7 +233,7 @@ export const GlobalSearchPanel: React.FC = () => {
             value={includeGlob}
             onChange={(e) => setIncludeGlob(e.target.value)}
             placeholder="Filter (e.g. *.ts,*.py)"
-            className="w-[155px] rounded-sm border px-2 py-0.5 font-mono text-[11px] outline-none"
+            className="w-[175px] rounded-sm border px-2.5 py-1 font-mono text-[12px] outline-none"
             style={{
               backgroundColor: 'var(--st-input)',
               borderColor: 'var(--st-border-light)',
@@ -241,8 +241,8 @@ export const GlobalSearchPanel: React.FC = () => {
             }}
           />
 
-          <div className="flex items-center gap-1.5 text-[10.5px] font-mono shrink-0" style={{ color: 'var(--st-text-dim)' }}>
-            {searchRunning && <Loader2 className="h-3 w-3 animate-spin" style={{ color: 'var(--st-accent)' }} />}
+          <div className="flex items-center gap-1.5 text-[11.5px] font-mono shrink-0" style={{ color: 'var(--st-text-dim)' }}>
+            {searchRunning && <Loader2 className="h-3.5 w-3.5 animate-spin" style={{ color: 'var(--st-accent)' }} />}
             {searchDone && (
               <span>
                 {searchDone.totalMatches} matches across {grouped.length} files ({searchDone.durationMs}ms)
@@ -254,17 +254,17 @@ export const GlobalSearchPanel: React.FC = () => {
 
       {/* Sublime Find Results Buffer Style Output */}
       <div
-        className="flex-1 overflow-y-auto px-3 py-2 font-mono text-[11.5px]"
+        className="flex-1 overflow-y-auto px-3 py-2 font-mono text-[12.5px]"
         style={{ backgroundColor: 'var(--st-editor)' }}
       >
         {searchDone?.errors && searchDone.errors.length > 0 && (
-          <div className="mb-2 rounded px-2.5 py-1.5 text-[11px]" style={{ backgroundColor: 'rgba(249,38,114,0.14)', color: 'var(--st-red)' }}>
+          <div className="mb-2 rounded px-2.5 py-1.5 text-[12px]" style={{ backgroundColor: 'rgba(249,38,114,0.14)', color: 'var(--st-red)' }}>
             {searchDone.errors.map((e) => `${envMap.get(e.envId)?.name || e.envId}: ${e.message}`).join(' · ')}
           </div>
         )}
 
         {grouped.length === 0 && !searchRunning ? (
-          <div className="py-6 text-center font-sans text-[11.5px]" style={{ color: 'var(--st-text-dim)' }}>
+          <div className="py-6 text-center font-sans text-[12.5px]" style={{ color: 'var(--st-text-dim)' }}>
             Type a search pattern above and press Enter.
           </div>
         ) : (
@@ -286,15 +286,15 @@ export const GlobalSearchPanel: React.FC = () => {
                   className="flex items-center gap-1.5 py-0.5 cursor-pointer hover:opacity-90"
                 >
                   {collapsed ? (
-                    <ChevronRight className="h-3 w-3 shrink-0" style={{ color: 'var(--st-text-dim)' }} />
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--st-text-dim)' }} />
                   ) : (
-                    <ChevronDown className="h-3 w-3 shrink-0" style={{ color: 'var(--st-text-dim)' }} />
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--st-text-dim)' }} />
                   )}
                   <span style={{ color: 'var(--st-accent)' }}>
                     {env && env.kind === 'ssh' ? `[${env.name}] ` : ''}
                     {g.filePath}:
                   </span>
-                  <span className="text-[10.5px]" style={{ color: 'var(--st-text-dim)' }}>
+                  <span className="text-[11.5px]" style={{ color: 'var(--st-text-dim)' }}>
                     ({g.items.length})
                   </span>
                 </div>
@@ -312,7 +312,7 @@ export const GlobalSearchPanel: React.FC = () => {
                         onClick={() => void openFile(m.envId, m.filePath, { line: m.line, column: m.column })}
                         className="flex items-baseline gap-2 pl-5 pr-2 py-0.5 cursor-pointer hover:bg-white/5"
                       >
-                        <span className="w-[42px] shrink-0 text-right" style={{ color: 'var(--st-text-dim)' }}>
+                        <span className="w-[46px] shrink-0 text-right" style={{ color: 'var(--st-text-dim)' }}>
                           {m.line}:
                         </span>
                         <span className="truncate" style={{ color: 'var(--st-text)' }}>

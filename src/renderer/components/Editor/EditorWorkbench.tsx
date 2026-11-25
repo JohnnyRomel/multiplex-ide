@@ -20,6 +20,7 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
   activeTabRef.current = tab
 
   const theme = useAppStore((s) => s.theme)
+  const editorFontSize = useAppStore((s) => s.editorFontSize)
   const updateTabContent = useAppStore((s) => s.updateTabContent)
   const saveTab = useAppStore((s) => s.saveTab)
   const clearPendingPosition = useAppStore((s) => s.clearPendingPosition)
@@ -34,6 +35,9 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
     const el = containerRef.current
     if (!el) return
 
+    const initialFontSize = useAppStore.getState().editorFontSize
+    const initialLineHeight = Math.round(initialFontSize * 1.52)
+
     if (isDiff) {
       editorRef.current?.dispose()
       editorRef.current = null
@@ -44,8 +48,8 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
         readOnly: true,
         renderSideBySide: true,
         fontFamily: 'Menlo, "SF Mono", "JetBrains Mono", Monaco, monospace',
-        fontSize: 13,
-        lineHeight: 20,
+        fontSize: initialFontSize,
+        lineHeight: initialLineHeight,
         minimap: { enabled: false }
       })
       diffEditorRef.current = diffEd
@@ -62,8 +66,8 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
       theme: getMonacoThemeName(useAppStore.getState().theme),
       automaticLayout: true,
       fontFamily: 'Menlo, "SF Mono", "JetBrains Mono", Monaco, monospace',
-      fontSize: 13,
-      lineHeight: 20,
+      fontSize: initialFontSize,
+      lineHeight: initialLineHeight,
       tabSize: 2,
       insertSpaces: true,
       smoothScrolling: true,
@@ -133,6 +137,12 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
   useEffect(() => {
     monaco.editor.setTheme(getMonacoThemeName(theme))
   }, [theme])
+
+  useEffect(() => {
+    const lineHeight = Math.round(editorFontSize * 1.52)
+    editorRef.current?.updateOptions({ fontSize: editorFontSize, lineHeight })
+    diffEditorRef.current?.updateOptions({ fontSize: editorFontSize, lineHeight })
+  }, [editorFontSize])
 
   useEffect(() => {
     if (!tab || tab.loading || tab.isBinary || tab.error) return
@@ -214,11 +224,11 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
 
       {!tab && (
         <div
-          className="flex h-full w-full flex-col items-center justify-center gap-3 select-none"
+          className="flex h-full w-full flex-col items-center justify-center gap-4 select-none"
           style={{ color: 'var(--st-text-dim)' }}
         >
-          <div className="text-[20px] font-light tracking-wider opacity-40">Sublime Multiplex</div>
-          <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px] font-mono opacity-65">
+          <div className="text-[22px] font-light tracking-wider opacity-40">Sublime Multiplex</div>
+          <div className="grid grid-cols-2 gap-x-8 gap-y-1.5 text-[12.5px] font-mono opacity-65">
             <span>Goto Files</span>
             <span>⌘ P</span>
             <span>Find in Files</span>
@@ -227,31 +237,35 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
             <span>⌘ ,</span>
             <span>Switch Workspace</span>
             <span>⌘ 1 / ⌘ 2 / ⌘ 3</span>
+            <span>New Terminal Tab</span>
+            <span>⌘ ⇧ T</span>
             <span>Split Terminal</span>
             <span>⌘ \</span>
+            <span>Font Size</span>
+            <span>⌘ + / ⌘ - / ⌘ 0</span>
           </div>
         </div>
       )}
 
       {tab?.loading && (
-        <div className="flex h-full w-full items-center justify-center text-[12px]" style={{ color: 'var(--st-text-muted)' }}>
+        <div className="flex h-full w-full items-center justify-center text-[13px]" style={{ color: 'var(--st-text-muted)' }}>
           Opening {tab.name}...
         </div>
       )}
 
       {tab?.error && (
-        <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-6 text-center text-[12px]">
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-6 text-center text-[13px]">
           <div style={{ color: 'var(--st-red)' }}>Unable to read {tab.name}</div>
-          <div className="font-mono text-[11px]" style={{ color: 'var(--st-text-muted)' }}>
+          <div className="font-mono text-[12px]" style={{ color: 'var(--st-text-muted)' }}>
             {tab.error}
           </div>
         </div>
       )}
 
       {tab?.isBinary && !tab.loading && !tab.error && (
-        <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-[12px]">
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-[13px]">
           <div style={{ color: 'var(--st-text-muted)' }}>Binary file is not displayed in text view</div>
-          <div className="font-mono text-[11px]" style={{ color: 'var(--st-text-dim)' }}>
+          <div className="font-mono text-[12px]" style={{ color: 'var(--st-text-dim)' }}>
             {tab.path}
           </div>
         </div>
@@ -283,7 +297,7 @@ export const EditorWorkbench: React.FC = () => {
     <div className="flex h-full w-full flex-col overflow-hidden" style={{ backgroundColor: 'var(--st-editor)' }}>
       {/* Authentic Sublime Text 3 Tab Strip */}
       <div
-        className="flex h-[34px] shrink-0 items-end justify-between pr-2"
+        className="flex h-[36px] shrink-0 items-end justify-between pr-2"
         style={{ backgroundColor: 'var(--st-tabbar)' }}
       >
         <div className="flex h-full flex-1 items-end overflow-x-auto pl-1.5">
@@ -300,13 +314,13 @@ export const EditorWorkbench: React.FC = () => {
                 onAuxClick={(e) => {
                   if (e.button === 1) closeTab(tab.id)
                 }}
-                className={`st3-tab group shrink-0 max-w-[230px] ${isActive ? 'st3-tab-active' : ''}`}
+                className={`st3-tab group shrink-0 max-w-[250px] ${isActive ? 'st3-tab-active' : ''}`}
                 title={`${env?.name || tab.envId}:${tab.path}`}
               >
                 <span className="truncate">{tab.name}</span>
 
                 {env && env.kind === 'ssh' && (
-                  <span className="ml-1.5 text-[10px] font-mono opacity-55 shrink-0">
+                  <span className="ml-1.5 text-[11px] font-mono opacity-55 shrink-0">
                     · {env.name}
                   </span>
                 )}
@@ -325,10 +339,10 @@ export const EditorWorkbench: React.FC = () => {
                         className="h-2 w-2 rounded-full group-hover:hidden"
                         style={{ backgroundColor: 'var(--st-dirty)' }}
                       />
-                      <X className="hidden h-3 w-3 group-hover:block" />
+                      <X className="hidden h-3.5 w-3.5 group-hover:block" />
                     </>
                   ) : (
-                    <X className="h-3 w-3 opacity-40 group-hover:opacity-100" />
+                    <X className="h-3.5 w-3.5 opacity-40 group-hover:opacity-100" />
                   )}
                 </button>
               </div>
@@ -341,10 +355,10 @@ export const EditorWorkbench: React.FC = () => {
             <button
               onClick={() => void saveTab(focusedTab.id)}
               title="Save (⌘S)"
-              className="flex items-center gap-1 rounded px-2 py-0.5 text-[10.5px] font-medium text-[#111]"
+              className="flex items-center gap-1 rounded px-2.5 py-0.5 text-[11.5px] font-medium text-[#111]"
               style={{ backgroundColor: 'var(--st-dirty)' }}
             >
-              <Save className="h-3 w-3" />
+              <Save className="h-3.5 w-3.5" />
               <span>Save</span>
             </button>
           )}
@@ -356,16 +370,16 @@ export const EditorWorkbench: React.FC = () => {
               className="flex items-center gap-1 rounded p-1 hover:bg-white/10"
               style={{ color: 'var(--st-text-dim)' }}
             >
-              <GitCompare className="h-3.5 w-3.5" />
+              <GitCompare className="h-4 w-4" />
             </button>
           )}
 
           {showDiffPicker && focusedTab && (
             <div
-              className="absolute right-0 top-[34px] z-40 w-[250px] rounded border py-1 shadow-2xl text-[11px]"
+              className="absolute right-0 top-[36px] z-40 w-[270px] rounded border py-1 shadow-2xl text-[12px]"
               style={{ backgroundColor: 'var(--st-panel)', borderColor: 'var(--st-border-light)' }}
             >
-              <div className="px-2.5 py-1 text-[10px] uppercase font-semibold" style={{ color: 'var(--st-text-dim)' }}>
+              <div className="px-2.5 py-1 text-[11px] uppercase font-semibold" style={{ color: 'var(--st-text-dim)' }}>
                 Compare {focusedTab.name} with...
               </div>
               {tabs
@@ -382,7 +396,7 @@ export const EditorWorkbench: React.FC = () => {
                       className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left hover:bg-white/10"
                     >
                       <span className="truncate">{other.name}</span>
-                      <span className="font-mono text-[10px] opacity-55">{oEnv?.name}</span>
+                      <span className="font-mono text-[11px] opacity-55">{oEnv?.name}</span>
                     </button>
                   )
                 })}

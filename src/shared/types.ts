@@ -23,6 +23,8 @@ export interface WorkspaceConfigEntry {
 
 export interface MultiplexConfigFile {
   theme?: EditorThemeId
+  editorFontSize?: number
+  terminalFontSize?: number
   showAllSshConfigHosts?: boolean
   extraPathDirs?: string[]
   workspaces: WorkspaceConfigEntry[]

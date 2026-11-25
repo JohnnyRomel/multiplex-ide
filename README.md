@@ -6,11 +6,12 @@ A macOS all-in-one multi-environment developer workspace that unifies **Sublime 
 
 - **Multi-Environment Workspaces (`Local` + SSH)**: Manage local and multiple remote SSH targets inside one window (`⌘ 1` .. `⌘ 9` instant switch, zero scrollback loss).
 - **Agentless OpenSSH `ControlMaster` Multiplexing**: Reuses macOS OpenSSH (`~/.ssh/config`, `ProxyJump`, `ProxyCommand`, 2FA/SSO/certificates) — no remote daemon installation required.
-- **cmux-Style Resilient Terminal**:
-  - Recursive horizontal/vertical split panes (`⌘ \` / `⌘ ⇧ \`), `xterm.js` WebGL rendering, OSC 9/99/777 attention badges.
+- **cmux-Style Resilient Multi-Tab Terminal**:
+  - **Multi-Tab Terminals per Workspace**: Open unlimited terminal tabs per environment (`⌘ ⇧ T`, `⌘ T`, or `+` button), switch via `⌘ ⇧ [` / `⌘ ⇧ ]`, double-click a tab to rename, and keep every tab's scrollback alive across tab & workspace switches.
+  - Recursive horizontal/vertical split panes inside every tab (`⌘ \` / `⌘ ⇧ \`), `xterm.js` WebGL rendering, OSC 9/99/777 unread badges.
   - **Seamless Disconnect & Reconnect**: Preserves 100% of local xterm scrollback across disconnects, auto-reconnects with exponential backoff and macOS wake-from-sleep (`powerMonitor`), and automatically attaches per-pane hidden-statusbar `tmux` sessions on remote hosts when available.
-- **Sublime Text 3-Inspired Editor**:
-  - Authentic **Monokai**, **Mariana**, and **Boxy Dark** themes, raised seamless tabs, dirty `●` indicator, Minimap, 1/2-column split (`⌥ ⌘ 1` / `⌥ ⌘ 2`), cross-environment file Diff, and classic ST3 shortcuts.
+- **Sublime Text 3-Inspired Editor (4K HiDPI-Ready)**:
+  - Authentic **Monokai**, **Mariana**, and **Boxy Dark** themes, comfortable 4K-friendly typography (`editorFontSize: 15`, `terminalFontSize: 14`, live `⌘ +` / `⌘ -` / `⌘ 0` zoom), raised seamless tabs, dirty `●` indicator, Minimap, 1/2-column split (`⌥ ⌘ 1` / `⌥ ⌘ 2`), cross-environment file Diff, and classic ST3 shortcuts.
   - Enhanced non-LSP syntax highlighting for **C/C++/CUDA** and **Python** (functions, namespaces, STL/typing types, `self`/`this`, `@decorators`, `#include`, f-strings, magic dunders, `TODO` tags).
 - **Fast Multi-Environment Search (`⌘ ⇧ F`) & Goto Files (`⌘ P`)**:
   - Server-side `rg --files -L` (follows symlinks, handles huge monorepos without truncation) + `file:line` jump.
@@ -36,7 +37,7 @@ cp multiplex.config.example.json multiplex.local.json
 
 Or press **`⌘ ,`** inside the app to edit your active config JSON directly in an editor tab — pressing **`⌘ S`** hot-reloads workspaces and theme immediately.
 
-See [multiplex.config.example.json](multiplex.config.example.json) for all supported fields (`theme`, `showAllSshConfigHosts`, `extraPathDirs`, and `workspaces`).
+See [multiplex.config.example.json](multiplex.config.example.json) for all supported fields (`theme`, `editorFontSize`, `terminalFontSize`, `showAllSshConfigHosts`, `extraPathDirs`, and `workspaces`).
 
 ## Development & Packaging (macOS)
 
@@ -62,10 +63,13 @@ npm run package:mac
 | `⌘ 1` .. `⌘ 9` | Switch workspace |
 | `⌘ P` | Goto Anything (supports `path:line` & multi-workspace toggle) |
 | `⌘ ⇧ F` | Find in Files across one or multiple environments |
+| `⌘ ⇧ T` (or `⌘ T` in terminal) | Open new terminal tab in active workspace |
+| `⌘ ⇧ [` / `⌘ ⇧ ]` | Switch previous / next terminal tab |
 | `⌘ \` / `⌘ ⇧ \` | Split active terminal horizontally / vertically |
+| `⌘ +` / `⌘ -` / `⌘ 0` | Increase / decrease / reset editor & terminal font sizes |
 | `⌥ ⌘ 1` / `⌥ ⌘ 2` | Single / 2-column editor layout |
 | `⌘ B` / `⌘ J` | Toggle sidebar / terminal panel |
-| `⌘ S` / `⌘ W` | Save current file / close current tab |
+| `⌘ S` / `⌘ W` | Save current file / close current editor tab or terminal pane |
 | `⌘ D` / `⌘ ⇧ D` / `⌘ L` / `⌘ ⇧ K` | Select next occurrence / duplicate line / select line / delete line |
 
 ## License & Third-Party Notices

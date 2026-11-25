@@ -32,7 +32,7 @@ function createWindow(): void {
     title: 'MultiplexIDE',
     backgroundColor: '#272822', // Classic Sublime Text 3 Monokai canvas
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 13, y: 10 },
+    trafficLightPosition: { x: 14, y: 12 },
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -91,10 +91,6 @@ function buildMacMenu(): void {
         { role: 'reload' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },
-        { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
         { type: 'separator' },
         { role: 'togglefullscreen' }
       ]

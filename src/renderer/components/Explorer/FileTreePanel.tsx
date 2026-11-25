@@ -90,9 +90,9 @@ const TreeNodeRow: React.FC<TreeNodeProps> = ({
           if (entry.isDirectory) onToggleDir(entry.path)
           else onOpenFile(entry.path)
         }}
-        className="group flex h-[22px] items-center gap-1 pr-2 cursor-pointer text-[12px]"
+        className="group flex h-[25px] items-center gap-1.5 pr-2 cursor-pointer text-[13px]"
         style={{
-          paddingLeft: `${10 + depth * 13}px`,
+          paddingLeft: `${10 + depth * 14}px`,
           backgroundColor: isDropHighlight ? 'rgba(166, 226, 46, 0.2)' : 'transparent'
         }}
         onMouseEnter={(e) => {
@@ -103,24 +103,24 @@ const TreeNodeRow: React.FC<TreeNodeProps> = ({
         }}
         title={`${entry.path}${env.kind === 'ssh' ? ' (Drag between trees to transfer, or ⌥+Drag to Finder)' : ''}`}
       >
-        <span className="flex w-3.5 shrink-0 items-center justify-center" style={{ color: 'var(--st-text-dim)' }}>
+        <span className="flex w-4 shrink-0 items-center justify-center" style={{ color: 'var(--st-text-dim)' }}>
           {entry.isDirectory ? (
             isOpen ? (
-              <ChevronDown className="h-3 w-3" />
+              <ChevronDown className="h-3.5 w-3.5" />
             ) : (
-              <ChevronRight className="h-3 w-3" />
+              <ChevronRight className="h-3.5 w-3.5" />
             )
           ) : null}
         </span>
 
         {entry.isDirectory ? (
           isOpen ? (
-            <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--st-text-muted)' }} />
+            <FolderOpen className="h-4 w-4 shrink-0" style={{ color: 'var(--st-text-muted)' }} />
           ) : (
-            <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--st-text-dim)' }} />
+            <Folder className="h-4 w-4 shrink-0" style={{ color: 'var(--st-text-dim)' }} />
           )
         ) : (
-          <FileCode className="h-3.5 w-3.5 shrink-0" style={{ color: getFileIconColor(entry.name) }} />
+          <FileCode className="h-4 w-4 shrink-0" style={{ color: getFileIconColor(entry.name) }} />
         )}
 
         <span
@@ -140,12 +140,12 @@ const TreeNodeRow: React.FC<TreeNodeProps> = ({
         </span>
 
         {isLoading && (
-          <RefreshCw className="h-2.5 w-2.5 animate-spin shrink-0" style={{ color: 'var(--st-text-dim)' }} />
+          <RefreshCw className="h-3 w-3 animate-spin shrink-0" style={{ color: 'var(--st-text-dim)' }} />
         )}
 
         {gitFlag && !isLoading && (
           <span
-            className="text-[9.5px] font-mono shrink-0"
+            className="text-[10.5px] font-mono shrink-0"
             style={{ color: gitFlag === 'M' ? 'var(--st-yellow)' : 'var(--st-green)' }}
           >
             {gitFlag}
@@ -202,6 +202,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
   const setActiveTab = useAppStore((s) => s.setActiveTab)
   const closeTab = useAppStore((s) => s.closeTab)
   const openFile = useAppStore((s) => s.openFile)
+  const createTerminalTab = useAppStore((s) => s.createTerminalTab)
   const splitTerminal = useAppStore((s) => s.splitTerminal)
   const ensureTerminalForEnv = useAppStore((s) => s.ensureTerminalForEnv)
   const setShowTransferDrawer = useAppStore((s) => s.setShowTransferDrawer)
@@ -482,7 +483,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
           </button>
 
           {openFilesExpanded && (
-            <div className="max-h-[140px] overflow-y-auto">
+            <div className="max-h-[160px] overflow-y-auto">
               {tabs.map((tab) => {
                 const tabEnv = environments.find((e) => e.id === tab.envId)
                 const isActive = tab.id === activeTabId
@@ -490,7 +491,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
                   <div
                     key={tab.id}
                     onClick={() => setActiveTab(tab.id)}
-                    className="group flex h-[22px] items-center gap-1.5 pl-4 pr-2 text-[12px] cursor-pointer"
+                    className="group flex h-[25px] items-center gap-1.5 pl-4 pr-2 text-[13px] cursor-pointer"
                     style={{
                       backgroundColor: isActive ? 'var(--st-sidebar-active)' : 'transparent',
                       color: isActive ? 'var(--st-text)' : 'var(--st-text-muted)'
@@ -501,22 +502,22 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
                         e.stopPropagation()
                         closeTab(tab.id)
                       }}
-                      className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded hover:bg-white/15"
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded hover:bg-white/15"
                       title="Close"
                     >
                       {tab.isDirty ? (
                         <span
-                          className="h-1.5 w-1.5 rounded-full group-hover:hidden"
+                          className="h-2 w-2 rounded-full group-hover:hidden"
                           style={{ backgroundColor: 'var(--st-dirty)' }}
                         />
                       ) : null}
                       <X
-                        className={`h-2.5 w-2.5 ${tab.isDirty ? 'hidden group-hover:block' : 'opacity-40 group-hover:opacity-100'}`}
+                        className={`h-3 w-3 ${tab.isDirty ? 'hidden group-hover:block' : 'opacity-40 group-hover:opacity-100'}`}
                       />
                     </button>
                     <span className="truncate flex-1">{tab.name}</span>
                     {tabEnv && tabEnv.kind === 'ssh' && (
-                      <span className="text-[10px] font-mono shrink-0" style={{ color: 'var(--st-text-dim)' }}>
+                      <span className="text-[11px] font-mono shrink-0" style={{ color: 'var(--st-text-dim)' }}>
                         {tabEnv.name}
                       </span>
                     )}
@@ -541,42 +542,42 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
           <button
             onClick={() => setInlinePrompt({ mode: 'new-file', parentDir: resolvedRoot, value: '' })}
             title="New File"
-            className="rounded p-0.5 hover:bg-white/10"
+            className="rounded p-1 hover:bg-white/10"
             style={{ color: 'var(--st-text-dim)' }}
           >
-            <FilePlus className="h-3 w-3" />
+            <FilePlus className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={() => setInlinePrompt({ mode: 'new-folder', parentDir: resolvedRoot, value: '' })}
             title="New Folder"
-            className="rounded p-0.5 hover:bg-white/10"
+            className="rounded p-1 hover:bg-white/10"
             style={{ color: 'var(--st-text-dim)' }}
           >
-            <FolderPlus className="h-3 w-3" />
+            <FolderPlus className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={handleUploadViaPicker}
             title="Upload Files/Folders"
-            className="rounded p-0.5 hover:bg-white/10"
+            className="rounded p-1 hover:bg-white/10"
             style={{ color: 'var(--st-text-dim)' }}
           >
-            <Upload className="h-3 w-3" />
+            <Upload className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={() => setShowHidden((v) => !v)}
             title={showHidden ? 'Hide Dotfiles' : 'Show Dotfiles'}
-            className="rounded p-0.5 hover:bg-white/10"
+            className="rounded p-1 hover:bg-white/10"
             style={{ color: 'var(--st-text-dim)' }}
           >
-            {showHidden ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
+            {showHidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
           </button>
           <button
             onClick={() => void loadDirectory(resolvedRoot, true)}
             title="Refresh"
-            className="rounded p-0.5 hover:bg-white/10"
+            className="rounded p-1 hover:bg-white/10"
             style={{ color: 'var(--st-text-dim)' }}
           >
-            <RefreshCw className="h-3 w-3" />
+            <RefreshCw className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
@@ -586,10 +587,10 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
         <button
           onClick={handleNavigateUp}
           title="Up one folder"
-          className="rounded p-0.5 hover:bg-white/10 shrink-0"
+          className="rounded p-1 hover:bg-white/10 shrink-0"
           style={{ color: 'var(--st-text-dim)' }}
         >
-          <ArrowUp className="h-3 w-3" />
+          <ArrowUp className="h-3.5 w-3.5" />
         </button>
         <form
           className="flex-1 min-w-0"
@@ -604,7 +605,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
           <input
             value={pathInput}
             onChange={(e) => setPathInput(e.target.value)}
-            className="w-full rounded px-1.5 py-0.5 font-mono text-[10.5px] outline-none border"
+            className="w-full rounded px-2 py-0.5 font-mono text-[11.5px] outline-none border"
             style={{
               backgroundColor: 'var(--st-input)',
               borderColor: 'var(--st-border)',
@@ -616,7 +617,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
           <button
             onClick={handlePickLocalFolder}
             title="Choose Folder"
-            className="rounded px-1.5 py-0.5 text-[10px] hover:bg-white/10 shrink-0"
+            className="rounded px-1.5 py-0.5 text-[11.5px] hover:bg-white/10 shrink-0"
             style={{ color: 'var(--st-text-muted)' }}
           >
             ...
@@ -627,10 +628,10 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
       {inlinePrompt && (
         <form
           onSubmit={handleInlineSubmit}
-          className="flex items-center gap-1 px-2 py-1 border-b"
+          className="flex items-center gap-1 px-2 py-1.5 border-b"
           style={{ backgroundColor: 'var(--st-panel)', borderColor: 'var(--st-border-light)' }}
         >
-          <span className="text-[10px] uppercase font-semibold shrink-0" style={{ color: 'var(--st-accent)' }}>
+          <span className="text-[11px] uppercase font-semibold shrink-0" style={{ color: 'var(--st-accent)' }}>
             {inlinePrompt.mode === 'new-file' ? 'File:' : inlinePrompt.mode === 'new-folder' ? 'Dir:' : 'Rename:'}
           </span>
           <input
@@ -640,7 +641,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
             onKeyDown={(e) => {
               if (e.key === 'Escape') setInlinePrompt(null)
             }}
-            className="flex-1 min-w-0 rounded px-1.5 py-0.5 font-mono text-[11px] outline-none border"
+            className="flex-1 min-w-0 rounded px-1.5 py-0.5 font-mono text-[12px] outline-none border"
             style={{ backgroundColor: 'var(--st-input)', borderColor: 'var(--st-border-light)' }}
           />
         </form>
@@ -649,7 +650,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
       {/* Directory Tree */}
       <div className="flex-1 overflow-y-auto py-1">
         {env.kind === 'ssh' && env.status !== 'connected' ? (
-          <div className="flex flex-col items-center justify-center gap-2.5 px-4 py-8 text-center text-[11.5px]">
+          <div className="flex flex-col items-center justify-center gap-2.5 px-4 py-8 text-center text-[12.5px]">
             <div style={{ color: 'var(--st-text-muted)' }}>
               <span className="font-mono font-medium">{env.name}</span> is disconnected
             </div>
@@ -663,19 +664,19 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
                   addToast('error', res.error)
                 }
               }}
-              className="rounded px-3 py-1 text-[11px] font-medium text-[#111]"
+              className="rounded px-3.5 py-1.5 text-[12px] font-medium text-[#111]"
               style={{ backgroundColor: 'var(--st-accent)' }}
             >
               Connect {env.name}
             </button>
           </div>
         ) : rootError ? (
-          <div className="px-3 py-4 text-[11px] space-y-2">
+          <div className="px-3 py-4 text-[12px] space-y-2">
             <div style={{ color: 'var(--st-red)' }}>{rootError}</div>
             <div className="flex items-center gap-1.5">
               <button
                 onClick={() => void loadDirectory(resolvedRoot, true)}
-                className="rounded px-2 py-0.5 text-[10.5px] border hover:bg-white/5"
+                className="rounded px-2.5 py-1 text-[11.5px] border hover:bg-white/5"
                 style={{ borderColor: 'var(--st-border-light)' }}
               >
                 Retry
@@ -683,7 +684,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
               {rootPath !== '~' && (
                 <button
                   onClick={() => setEnvRootPath(env.id, '~')}
-                  className="rounded px-2 py-0.5 text-[10.5px] border hover:bg-white/5"
+                  className="rounded px-2.5 py-1 text-[11.5px] border hover:bg-white/5"
                   style={{ borderColor: 'var(--st-border-light)', color: 'var(--st-accent-blue)' }}
                 >
                   Open ~ instead
@@ -692,7 +693,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
             </div>
           </div>
         ) : rootEntries.length === 0 ? (
-          <div className="px-3 py-6 text-center text-[11px]" style={{ color: 'var(--st-text-dim)' }}>
+          <div className="px-3 py-6 text-center text-[12px]" style={{ color: 'var(--st-text-dim)' }}>
             {loadingDirs.has(resolvedRoot) ? 'Loading...' : 'Empty folder'}
           </div>
         ) : (
@@ -732,10 +733,10 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
       {/* Context Menu */}
       {contextMenu && (
         <div
-          className="fixed z-50 min-w-[180px] rounded border py-1 shadow-2xl text-[11.5px]"
+          className="fixed z-50 min-w-[205px] rounded border py-1 shadow-2xl text-[12.5px]"
           style={{
-            left: Math.min(contextMenu.x, window.innerWidth - 200),
-            top: Math.min(contextMenu.y, window.innerHeight - 260),
+            left: Math.min(contextMenu.x, window.innerWidth - 220),
+            top: Math.min(contextMenu.y, window.innerHeight - 300),
             backgroundColor: 'var(--st-panel)',
             borderColor: 'var(--st-border-light)'
           }}
@@ -746,7 +747,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
                 onClick={() => void openFile(env.id, contextMenu.entry.path, undefined, 0)}
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/10"
               >
-                <File className="h-3.5 w-3.5" /> Open File
+                <File className="h-4 w-4" /> Open File
               </button>
               <button
                 onClick={() => {
@@ -755,7 +756,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
                 }}
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/10"
               >
-                <FileCode className="h-3.5 w-3.5" /> Open in Column 2
+                <FileCode className="h-4 w-4" /> Open in Column 2
               </button>
             </>
           )}
@@ -770,7 +771,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/10"
               style={{ color: 'var(--st-accent)' }}
             >
-              <Download className="h-3.5 w-3.5" /> Download to Mac...
+              <Download className="h-4 w-4" /> Download to Mac...
             </button>
           )}
 
@@ -779,9 +780,21 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
               onClick={() => void window.multiplex.showInFinder(contextMenu.entry.path)}
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/10"
             >
-              <FolderOpen className="h-3.5 w-3.5" /> Reveal in Finder
+              <FolderOpen className="h-4 w-4" /> Reveal in Finder
             </button>
           )}
+
+          <button
+            onClick={() => {
+              const dir = contextMenu.entry.isDirectory
+                ? contextMenu.entry.path
+                : contextMenu.entry.path.slice(0, contextMenu.entry.path.lastIndexOf('/')) || '/'
+              void createTerminalTab(env.id, { cwd: dir })
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/10"
+          >
+            <Terminal className="h-4 w-4" /> New Terminal Tab Here
+          </button>
 
           <button
             onClick={() => {
@@ -792,7 +805,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
             }}
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/10"
           >
-            <Terminal className="h-3.5 w-3.5" /> Open Terminal Here
+            <Terminal className="h-4 w-4" /> Split Terminal Here
           </button>
 
           <div className="my-1 border-t" style={{ borderColor: 'var(--st-border)' }} />
@@ -848,10 +861,10 @@ export const FileTreePanel: React.FC = () => {
     <button
       onClick={() => setDualExplorerEnabled(!dualExplorerEnabled)}
       title="Split Explorer into 2 Environments for Drag & Drop Transfer"
-      className="rounded p-0.5 hover:bg-white/10"
+      className="rounded p-1 hover:bg-white/10"
       style={{ color: dualExplorerEnabled ? 'var(--st-accent)' : 'var(--st-text-dim)' }}
     >
-      <ArrowLeftRight className="h-3 w-3" />
+      <ArrowLeftRight className="h-3.5 w-3.5" />
     </button>
   )
 
@@ -882,7 +895,7 @@ export const FileTreePanel: React.FC = () => {
                 <select
                   value={secondaryEnvId}
                   onChange={(e) => setSecondaryEnvId(e.target.value)}
-                  className="rounded border px-1.5 py-0.5 text-[10.5px] font-mono outline-none max-w-[130px]"
+                  className="rounded border px-1.5 py-0.5 text-[11.5px] font-mono outline-none max-w-[145px]"
                   style={{
                     backgroundColor: 'var(--st-input)',
                     borderColor: 'var(--st-border-light)',

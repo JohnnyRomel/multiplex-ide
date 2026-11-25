@@ -40,13 +40,13 @@ export const TopToolbar: React.FC = () => {
     return (
       <button
         onClick={() => setLayoutMode(mode)}
-        className="flex items-center gap-1 rounded-sm px-2 py-0.5 text-[11px] transition-colors"
+        className="flex items-center gap-1.5 rounded-sm px-2.5 py-0.5 text-[12px] transition-colors"
         style={{
           backgroundColor: active ? 'var(--st-sidebar-active)' : 'transparent',
           color: active ? 'var(--st-text)' : 'var(--st-text-dim)'
         }}
       >
-        <Icon className="h-3 w-3" />
+        <Icon className="h-3.5 w-3.5" />
         <span>{label}</span>
       </button>
     )
@@ -54,7 +54,7 @@ export const TopToolbar: React.FC = () => {
 
   return (
     <header
-      className="drag-region flex h-[34px] shrink-0 items-center justify-between border-b pl-[78px] pr-2.5"
+      className="drag-region flex h-[38px] shrink-0 items-center justify-between border-b pl-[80px] pr-3"
       style={{ backgroundColor: 'var(--st-titlebar)', borderColor: 'var(--st-border)' }}
     >
       {/* Left: Quick Workspace Tabs (always visible for instant switching between workspaces!) */}
@@ -65,7 +65,7 @@ export const TopToolbar: React.FC = () => {
             <button
               key={env.id}
               onClick={() => setActiveEnv(env.id)}
-              className="flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-[11px] transition-colors"
+              className="flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-[12px] transition-colors"
               style={{
                 backgroundColor: isActive ? 'var(--st-sidebar-active)' : 'transparent',
                 color: isActive ? 'var(--st-text)' : 'var(--st-text-dim)'
@@ -73,7 +73,7 @@ export const TopToolbar: React.FC = () => {
               title={`Switch to ${env.name}`}
             >
               <span
-                className="h-1.5 w-1.5 rounded-full"
+                className="h-2 w-2 rounded-full"
                 style={{
                   backgroundColor:
                     env.status === 'connected' ? 'var(--st-green)' : 'var(--st-text-dim)'
@@ -98,7 +98,7 @@ export const TopToolbar: React.FC = () => {
 
         <button
           onClick={() => setShowQuickOpen(true)}
-          className="flex items-center gap-2 rounded-sm border px-2.5 py-0.5 text-[11px] hover:bg-white/5"
+          className="flex items-center gap-2.5 rounded-sm border px-3 py-1 text-[12px] hover:bg-white/5"
           style={{
             backgroundColor: 'var(--st-input)',
             borderColor: 'var(--st-border-light)',
@@ -107,19 +107,19 @@ export const TopToolbar: React.FC = () => {
           title="Goto Anything (⌘P)"
         >
           <span>Goto Files...</span>
-          <kbd className="font-mono text-[10px]">⌘P</kbd>
+          <kbd className="font-mono text-[11px]">⌘P</kbd>
         </button>
       </div>
 
       {/* Right: Subtle Sublime utility icons */}
-      <div className="no-drag flex items-center gap-0.5">
+      <div className="no-drag flex items-center gap-1">
         <button
           onClick={() => setShowSearchPanel(!showSearchPanel)}
           title="Find in Files (⌘⇧F)"
           className="rounded p-1.5 hover:bg-white/10"
           style={{ color: showSearchPanel ? 'var(--st-text)' : 'var(--st-text-dim)' }}
         >
-          <Search className="h-3.5 w-3.5" />
+          <Search className="h-4 w-4" />
         </button>
 
         <button
@@ -128,7 +128,7 @@ export const TopToolbar: React.FC = () => {
           className="rounded p-1.5 hover:bg-white/10"
           style={{ color: editorColumns === 2 ? 'var(--st-text)' : 'var(--st-text-dim)' }}
         >
-          {editorColumns === 2 ? <Columns2 className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
+          {editorColumns === 2 ? <Columns2 className="h-4 w-4" /> : <Square className="h-4 w-4" />}
         </button>
 
         <button
@@ -137,7 +137,7 @@ export const TopToolbar: React.FC = () => {
           className="rounded p-1.5 hover:bg-white/10"
           style={{ color: showSidebar ? 'var(--st-text)' : 'var(--st-text-dim)' }}
         >
-          <PanelLeft className="h-3.5 w-3.5" />
+          <PanelLeft className="h-4 w-4" />
         </button>
 
         <button
@@ -146,7 +146,7 @@ export const TopToolbar: React.FC = () => {
           className="rounded p-1.5 hover:bg-white/10"
           style={{ color: showTerminalPanel ? 'var(--st-text)' : 'var(--st-text-dim)' }}
         >
-          <PanelBottom className="h-3.5 w-3.5" />
+          <PanelBottom className="h-4 w-4" />
         </button>
 
         <button
@@ -155,9 +155,9 @@ export const TopToolbar: React.FC = () => {
           className="relative flex items-center gap-1 rounded p-1.5 hover:bg-white/10"
           style={{ color: activeTransfers > 0 ? 'var(--st-accent)' : 'var(--st-text-dim)' }}
         >
-          <UploadCloud className="h-3.5 w-3.5" />
+          <UploadCloud className="h-4 w-4" />
           {activeTransfers > 0 && (
-            <span className="font-mono text-[10px] font-bold">{activeTransfers}</span>
+            <span className="font-mono text-[11px] font-bold">{activeTransfers}</span>
           )}
         </button>
 
@@ -167,7 +167,7 @@ export const TopToolbar: React.FC = () => {
           className="rounded p-1.5 hover:bg-white/10"
           style={{ color: 'var(--st-text-dim)' }}
         >
-          <Settings className="h-3.5 w-3.5" />
+          <Settings className="h-4 w-4" />
         </button>
       </div>
     </header>

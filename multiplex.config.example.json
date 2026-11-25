@@ -1,5 +1,7 @@
 {
   "theme": "monokai",
+  "editorFontSize": 15,
+  "terminalFontSize": 14,
   "showAllSshConfigHosts": false,
   "extraPathDirs": [],
   "workspaces": [

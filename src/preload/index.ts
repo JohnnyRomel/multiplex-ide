@@ -30,13 +30,35 @@ const api = {
   },
 
   // Config & Environments
-  getConfigInfo: (): Promise<{ configPath: string; theme: EditorThemeId }> =>
-    ipcRenderer.invoke(IPC.CONFIG_GET_PATH),
-  reloadConfig: (): Promise<{ environments: Environment[]; theme: EditorThemeId }> =>
-    ipcRenderer.invoke(IPC.CONFIG_RELOAD),
-  onConfigUpdated: (cb: (payload: { environments: Environment[]; theme: EditorThemeId }) => void): (() => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, payload: { environments: Environment[]; theme: EditorThemeId }) =>
-      cb(payload)
+  getConfigInfo: (): Promise<{
+    configPath: string
+    theme: EditorThemeId
+    editorFontSize: number
+    terminalFontSize: number
+  }> => ipcRenderer.invoke(IPC.CONFIG_GET_PATH),
+  reloadConfig: (): Promise<{
+    environments: Environment[]
+    theme: EditorThemeId
+    editorFontSize: number
+    terminalFontSize: number
+  }> => ipcRenderer.invoke(IPC.CONFIG_RELOAD),
+  onConfigUpdated: (
+    cb: (payload: {
+      environments: Environment[]
+      theme: EditorThemeId
+      editorFontSize?: number
+      terminalFontSize?: number
+    }) => void
+  ): (() => void) => {
+    const handler = (
+      _e: Electron.IpcRendererEvent,
+      payload: {
+        environments: Environment[]
+        theme: EditorThemeId
+        editorFontSize?: number
+        terminalFontSize?: number
+      }
+    ) => cb(payload)
     ipcRenderer.on(IPC.CONFIG_UPDATED, handler)
     return () => ipcRenderer.removeListener(IPC.CONFIG_UPDATED, handler)
   },
@@ -46,8 +68,14 @@ const api = {
   refreshEnvironments: (): Promise<Environment[]> => ipcRenderer.invoke(IPC.ENV_REFRESH),
   addCustomHost: (input: CustomHostInput): Promise<Environment> => ipcRenderer.invoke(IPC.ENV_ADD_CUSTOM, input),
   deleteCustomHost: (envId: string): Promise<Environment[]> => ipcRenderer.invoke(IPC.ENV_DELETE_CUSTOM, envId),
-  updateEnvSettings: (envId: string, patch: Partial<Environment> & { theme?: EditorThemeId }): Promise<Environment | undefined> =>
-    ipcRenderer.invoke(IPC.ENV_UPDATE_SETTINGS, envId, patch),
+  updateEnvSettings: (
+    envId: string,
+    patch: Partial<Environment> & {
+      theme?: EditorThemeId
+      editorFontSize?: number
+      terminalFontSize?: number
+    }
+  ): Promise<Environment | undefined> => ipcRenderer.invoke(IPC.ENV_UPDATE_SETTINGS, envId, patch),
   connectEnvironment: (envId: string): Promise<{ ok: boolean; needsInteractiveAuth?: boolean; error?: string; env: Environment }> =>
     ipcRenderer.invoke(IPC.ENV_CONNECT, envId),
   disconnectEnvironment: (envId: string): Promise<Environment> => ipcRenderer.invoke(IPC.ENV_DISCONNECT, envId),

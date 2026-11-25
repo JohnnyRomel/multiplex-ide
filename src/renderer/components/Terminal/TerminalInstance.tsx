@@ -57,7 +57,6 @@ function getXtermTheme(theme: EditorThemeId) {
       brightWhite: '#ffffff'
     }
   }
-  // Default: Classic Sublime Text 3 Monokai
   return {
     background: '#22231e',
     foreground: '#f8f8f2',
@@ -84,19 +83,21 @@ function getXtermTheme(theme: EditorThemeId) {
 
 interface Props {
   envId: string
+  tabId: string
   paneId: string
   terminalId: string
   title: string
   isVisible: boolean
 }
 
-export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, title, isVisible }) => {
+export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, terminalId, title, isVisible }) => {
   const containerRef = useRef<HTMLDivElement>(null)
   const xtermRef = useRef<XTerm | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchRef = useRef<SearchAddon | null>(null)
 
   const theme = useAppStore((s) => s.theme)
+  const terminalFontSize = useAppStore((s) => s.terminalFontSize)
   const focusedTerminalId = useAppStore((s) => s.focusedTerminalId)
   const setFocusedPane = useAppStore((s) => s.setFocusedPane)
   const splitTerminal = useAppStore((s) => s.splitTerminal)
@@ -114,15 +115,16 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
     const el = containerRef.current
     if (!el) return
 
+    const initState = useAppStore.getState()
     const term = new XTerm({
       fontFamily: 'Menlo, "SF Mono", "JetBrains Mono", Monaco, monospace',
-      fontSize: 12.5,
-      lineHeight: 1.24,
+      fontSize: initState.terminalFontSize,
+      lineHeight: 1.28,
       cursorBlink: true,
       cursorStyle: 'block',
       macOptionIsMeta: true,
-      scrollback: 10000,
-      theme: getXtermTheme(useAppStore.getState().theme)
+      scrollback: 15000,
+      theme: getXtermTheme(initState.theme)
     })
 
     const fitAddon = new FitAddon()
@@ -173,7 +175,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
     })
     observer.observe(el)
 
-    // Let global IDE shortcuts pass through xterm cleanly!
+    // Pass app-level Cmd shortcuts through to window listener cleanly!
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type === 'keydown' && ev.metaKey) {
         const k = ev.key.toLowerCase()
@@ -185,14 +187,21 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
           term.clear()
           return false
         }
-        // Pass app-level Cmd shortcuts up to window listener instead of sending escape chars to PTY
         if (
           k === 'p' ||
+          k === 't' ||
+          k === 'w' ||
           (ev.shiftKey && k === 'f') ||
           k === 'b' ||
           k === 'j' ||
           k === ',' ||
           k === 's' ||
+          k === '=' ||
+          k === '+' ||
+          k === '-' ||
+          k === '0' ||
+          k === '[' ||
+          k === ']' ||
           ev.code === 'Backslash' ||
           (k >= '1' && k <= '9')
         ) {
@@ -211,11 +220,30 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
     }
   }, [terminalId])
 
+  // Live theme sync
   useEffect(() => {
     if (xtermRef.current) {
       xtermRef.current.options.theme = getXtermTheme(theme)
     }
   }, [theme])
+
+  // Live font size sync (refit PTY rows/cols immediately!)
+  useEffect(() => {
+    const term = xtermRef.current
+    const fit = fitRef.current
+    if (!term || !fit) return
+    term.options.fontSize = terminalFontSize
+    if (isVisible) {
+      requestAnimationFrame(() => {
+        try {
+          fit.fit()
+          window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
+        } catch {
+          // ignore
+        }
+      })
+    }
+  }, [terminalFontSize, isVisible, terminalId])
 
   useEffect(() => {
     if (isVisible && fitRef.current && xtermRef.current) {
@@ -266,16 +294,17 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
       className="flex h-full w-full flex-col overflow-hidden"
       style={{
         backgroundColor: 'var(--st-terminal)',
-        borderTop: isFocused ? '1px solid var(--st-border-light)' : '1px solid var(--st-border)'
+        outline: isFocused ? '1px solid rgba(255,255,255,0.08)' : 'none',
+        outlineOffset: '-1px'
       }}
-      onMouseDown={() => setFocusedPane(envId, paneId, terminalId)}
+      onMouseDown={() => setFocusedPane(envId, tabId, paneId, terminalId)}
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDropPath}
     >
-      {/* Ultra-slim ST3 terminal header */}
+      {/* Compact pane sub-header */}
       <div
-        className="flex h-[23px] shrink-0 items-center justify-between px-2.5 border-b text-[10.5px]"
-        style={{ backgroundColor: 'var(--st-tabbar)', borderColor: 'var(--st-border)' }}
+        className="flex h-[25px] shrink-0 items-center justify-between px-2.5 border-b text-[11.5px]"
+        style={{ backgroundColor: 'var(--st-panel)', borderColor: 'var(--st-border)' }}
       >
         <div className="flex items-center gap-1.5 min-w-0">
           <span
@@ -297,7 +326,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
           </span>
           {termStatus?.tmuxSession && (
             <span
-              className="rounded px-1 text-[9px] font-mono shrink-0"
+              className="rounded px-1 text-[10px] font-mono shrink-0"
               style={{ backgroundColor: 'rgba(255,255,255,0.06)', color: 'var(--st-text-dim)' }}
               title={`Persistent remote tmux session: ${termStatus.tmuxSession}`}
             >
@@ -305,12 +334,12 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
             </span>
           )}
           {connState === 'reconnecting' && (
-            <span className="font-mono text-[10px] shrink-0" style={{ color: 'var(--st-yellow)' }}>
+            <span className="font-mono text-[11px] shrink-0" style={{ color: 'var(--st-yellow)' }}>
               {termStatus?.message || 'Reconnecting...'}
             </span>
           )}
           {connState === 'disconnected' && (
-            <span className="font-mono text-[10px] shrink-0" style={{ color: 'var(--st-red)' }}>
+            <span className="font-mono text-[11px] shrink-0" style={{ color: 'var(--st-red)' }}>
               Disconnected
             </span>
           )}
@@ -330,7 +359,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
                 color: connState === 'disconnected' ? 'var(--st-accent)' : 'var(--st-text-dim)'
               }}
             >
-              <RotateCw className={`h-3 w-3 ${connState === 'reconnecting' ? 'animate-spin' : ''}`} />
+              <RotateCw className={`h-3.5 w-3.5 ${connState === 'reconnecting' ? 'animate-spin' : ''}`} />
             </button>
           )}
           <button
@@ -342,50 +371,50 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
             className="rounded p-0.5 hover:bg-white/10"
             style={{ color: 'var(--st-text-dim)' }}
           >
-            <Search className="h-3 w-3" />
+            <Search className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={(e) => {
               e.stopPropagation()
-              setFocusedPane(envId, paneId, terminalId)
+              setFocusedPane(envId, tabId, paneId, terminalId)
               void splitTerminal(envId, 'horizontal')
             }}
             title="Split Right (⌘\)"
             className="rounded p-0.5 hover:bg-white/10"
             style={{ color: 'var(--st-text-dim)' }}
           >
-            <Columns2 className="h-3 w-3" />
+            <Columns2 className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={(e) => {
               e.stopPropagation()
-              setFocusedPane(envId, paneId, terminalId)
+              setFocusedPane(envId, tabId, paneId, terminalId)
               void splitTerminal(envId, 'vertical')
             }}
             title="Split Down (⌘⇧\)"
             className="rounded p-0.5 hover:bg-white/10"
             style={{ color: 'var(--st-text-dim)' }}
           >
-            <Rows2 className="h-3 w-3" />
+            <Rows2 className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={(e) => {
               e.stopPropagation()
               void closeTerminal(envId, terminalId)
             }}
-            title="Close Terminal"
+            title="Close Pane"
             className="rounded p-0.5 hover:bg-white/10"
             style={{ color: 'var(--st-text-dim)' }}
           >
-            <X className="h-3 w-3" />
+            <X className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
 
-      {/* Non-destructive cmux-style reconnect banner (scrollback stays 100% visible below!) */}
+      {/* Non-destructive cmux-style reconnect banner */}
       {env?.kind === 'ssh' && (connState === 'disconnected' || connState === 'reconnecting') && (
         <div
-          className="flex items-center justify-between gap-2 px-2.5 py-1 border-b text-[11px]"
+          className="flex items-center justify-between gap-2 px-3 py-1.5 border-b text-[12px]"
           style={{
             backgroundColor: connState === 'reconnecting' ? 'rgba(230, 219, 116, 0.1)' : 'rgba(249, 38, 114, 0.12)',
             borderColor: 'var(--st-border)'
@@ -393,10 +422,10 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
         >
           <div className="flex items-center gap-1.5 min-w-0">
             <WifiOff
-              className="h-3 w-3 shrink-0"
+              className="h-3.5 w-3.5 shrink-0"
               style={{ color: connState === 'reconnecting' ? 'var(--st-yellow)' : 'var(--st-red)' }}
             />
-            <span className="truncate font-mono text-[10.5px]" style={{ color: 'var(--st-text)' }}>
+            <span className="truncate font-mono text-[11.5px]" style={{ color: 'var(--st-text)' }}>
               {termStatus?.message || (connState === 'reconnecting' ? 'Reconnecting...' : 'SSH Disconnected')}
             </span>
           </div>
@@ -406,7 +435,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
               void reconnectTerminal(terminalId, true)
               xtermRef.current?.focus()
             }}
-            className="shrink-0 rounded-sm px-2 py-0.5 text-[10.5px] font-medium text-[#111]"
+            className="shrink-0 rounded-sm px-2.5 py-0.5 text-[11.5px] font-medium text-[#111]"
             style={{ backgroundColor: 'var(--st-accent)' }}
           >
             Reconnect Now
@@ -416,7 +445,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
 
       {showFind && (
         <div
-          className="flex items-center gap-1.5 px-2 py-1 border-b text-[11px]"
+          className="flex items-center gap-1.5 px-2.5 py-1 border-b text-[12px]"
           style={{ backgroundColor: 'var(--st-panel)', borderColor: 'var(--st-border)' }}
         >
           <input
@@ -436,11 +465,11 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
               }
             }}
             placeholder="Find in terminal..."
-            className="flex-1 rounded px-1.5 py-0.5 font-mono text-[11px] outline-none border"
+            className="flex-1 rounded px-2 py-0.5 font-mono text-[12px] outline-none border"
             style={{ backgroundColor: 'var(--st-input)', borderColor: 'var(--st-border-light)' }}
           />
           <button onClick={() => setShowFind(false)} className="rounded p-0.5 hover:bg-white/10">
-            <X className="h-3 w-3" />
+            <X className="h-3.5 w-3.5" />
           </button>
         </div>
       )}

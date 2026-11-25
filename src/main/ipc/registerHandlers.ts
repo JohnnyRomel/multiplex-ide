@@ -57,7 +57,9 @@ export function registerIpcHandlers(services: MainServices): void {
   // --- Config & Environments ---
   ipcMain.handle(IPC.CONFIG_GET_PATH, () => ({
     configPath: registry.getConfigPath(),
-    theme: registry.getTheme()
+    theme: registry.getTheme(),
+    editorFontSize: registry.getEditorFontSize(),
+    terminalFontSize: registry.getTerminalFontSize()
   }))
 
   ipcMain.handle(IPC.CONFIG_RELOAD, () => broadcastConfigUpdated())
