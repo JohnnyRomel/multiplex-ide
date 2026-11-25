@@ -68,6 +68,17 @@ npm run package:mac
 | `⌘ S` / `⌘ W` | Save current file / close current tab |
 | `⌘ D` / `⌘ ⇧ D` / `⌘ L` / `⌘ ⇧ K` | Select next occurrence / duplicate line / select line / delete line |
 
-## License
+## License & Third-Party Notices
 
-[MIT](LICENSE)
+MultiplexIDE is released under the [MIT License](LICENSE).
+
+All bundled runtime dependencies (including Electron, Monaco Editor, xterm.js, node-pty, Allotment, React, Zustand, Lucide Icons, ssh-config, and ssh2-streams) use permissive MIT / ISC / BSD / Unlicense licenses that are fully compatible with MIT. Full verbatim copyright notices and license texts are provided in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and bundled into packaged macOS builds.
+
+Verify or regenerate license notices after dependency changes:
+
+```bash
+npm run licenses:check
+npm run licenses:generate
+```
+
+> **Trademarks**: MultiplexIDE is an independent open-source project and is not affiliated with Sublime HQ Pty Ltd (Sublime Text), Microsoft Corporation (VS Code), or Manaflow AI (cmux).

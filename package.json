@@ -2,6 +2,11 @@
   "name": "multiplex-ide",
   "version": "0.1.0",
   "description": "macOS all-in-one Multi-Environment Terminal, Code Editor, Global Search & SFTP File Transfer IDE",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JohnnyRomel/multiplex-id.git"
+  },
   "private": true,
   "browserslist": [
     "last 2 Chrome versions"
@@ -13,6 +18,8 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
+    "licenses:generate": "node scripts/generate-notices.mjs",
+    "licenses:check": "node scripts/generate-notices.mjs --check",
     "rebuild": "electron-rebuild -f -w node-pty",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-*/spawn-helper 2>/dev/null || true; electron-rebuild -f -w node-pty || true",
     "package:mac": "npm run build && electron-builder --mac"
@@ -58,7 +65,19 @@
     },
     "files": [
       "out/**/*",
-      "package.json"
+      "package.json",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md"
+    ],
+    "extraResources": [
+      {
+        "from": "LICENSE",
+        "to": "LICENSE"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
