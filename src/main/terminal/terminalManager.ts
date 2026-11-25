@@ -99,19 +99,24 @@ function remoteCdSnippet(targetDir?: string): string {
 export function buildRemoteTmuxBootstrapCommand(tmuxSession: string, targetDir?: string): string {
   const s = shellQuote(tmuxSession)
   const cdCmd = remoteCdSnippet(targetDir)
+  // NOTE: `'\;'` (quoted backslash-semicolon) is critical for tmux CLI `bind-key`:
+  // unquoted `\;` passes a bare `;` to tmux, which tmux interprets as its own top-level
+  // command separator and truncates the keybinding to just `select-pane`!
   return (
     `if command -v tmux >/dev/null 2>&1; then ` +
     `if ! tmux has-session -t ${s} 2>/dev/null; then ${cdCmd}tmux new-session -d -s ${s}; fi; ` +
     `tmux set-option -t ${s} status off >/dev/null 2>&1 || true; ` +
+    `tmux set-option -g mouse on >/dev/null 2>&1 || true; ` +
     `tmux set-option -t ${s} mouse on >/dev/null 2>&1 || true; ` +
+    `tmux set-option -sg escape-time 10 >/dev/null 2>&1 || true; ` +
     `tmux set-option -t ${s} history-limit 50000 >/dev/null 2>&1 || true; ` +
     `tmux set-option -as terminal-overrides ',xterm*:Ms=\\E]52;%p1%s;%p2%s\\007' >/dev/null 2>&1 || true; ` +
     `tmux set-option -s set-clipboard on >/dev/null 2>&1 || true; ` +
     `tmux set-option -g set-clipboard on >/dev/null 2>&1 || true; ` +
-    `tmux bind-key -T copy-mode WheelUpPane select-pane \\; send-keys -X -N 3 scroll-up >/dev/null 2>&1 || true; ` +
-    `tmux bind-key -T copy-mode WheelDownPane select-pane \\; send-keys -X -N 3 scroll-down >/dev/null 2>&1 || true; ` +
-    `tmux bind-key -T copy-mode-vi WheelUpPane select-pane \\; send-keys -X -N 3 scroll-up >/dev/null 2>&1 || true; ` +
-    `tmux bind-key -T copy-mode-vi WheelDownPane select-pane \\; send-keys -X -N 3 scroll-down >/dev/null 2>&1 || true; ` +
+    `tmux bind-key -T copy-mode WheelUpPane select-pane '\\;' send-keys -X -N 3 scroll-up >/dev/null 2>&1 || true; ` +
+    `tmux bind-key -T copy-mode WheelDownPane select-pane '\\;' send-keys -X -N 3 scroll-down >/dev/null 2>&1 || true; ` +
+    `tmux bind-key -T copy-mode-vi WheelUpPane select-pane '\\;' send-keys -X -N 3 scroll-up >/dev/null 2>&1 || true; ` +
+    `tmux bind-key -T copy-mode-vi WheelDownPane select-pane '\\;' send-keys -X -N 3 scroll-down >/dev/null 2>&1 || true; ` +
     `exec tmux attach-session -t ${s}; ` +
     `else ${cdCmd}exec \${SHELL:-/bin/bash} -l; fi`
   )

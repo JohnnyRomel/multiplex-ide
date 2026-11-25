@@ -1,6 +1,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { execFileSync } from 'child_process'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   parseSshConfigContent,
@@ -398,13 +399,60 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
     expect(fs.existsSync(ctlPath)).toBe(false)
   })
 
-  it('enables tmux mouse scrolling and OSC 52 clipboard overrides so TUI apps like agy scroll instead of recalling input history', () => {
+  it('enables tmux mouse scrolling and OSC 52 clipboard overrides without truncating WheelUpPane bindings', () => {
     const cmd = buildRemoteTmuxBootstrapCommand('mide_1_abcd', '/workspace/demo')
+    expect(cmd).toContain("tmux set-option -g mouse on")
     expect(cmd).toContain("tmux set-option -t 'mide_1_abcd' mouse on")
     expect(cmd).toContain("tmux set-option -t 'mide_1_abcd' status off")
     expect(cmd).toContain("tmux set-option -t 'mide_1_abcd' history-limit 50000")
     expect(cmd).toContain('terminal-overrides')
     expect(cmd).toContain('set-clipboard on')
-    expect(cmd).toContain('WheelUpPane')
+    expect(cmd).toContain("select-pane '\\;' send-keys -X -N 3 scroll-up")
+
+    // If tmux is installed locally, execute the exact setup snippet against an isolated server
+    // to prove shell quoting preserves `select-pane ; send-keys -X -N 3 scroll-up` end-to-end!
+    let hasTmux = false
+    try {
+      execFileSync('/bin/sh', ['-c', 'command -v tmux >/dev/null 2>&1'])
+      hasTmux = true
+    } catch {
+      hasTmux = false
+    }
+    if (hasTmux) {
+      const sock = `mide_ut_${process.pid}_${Date.now().toString(36)}`
+      const setupOnly = cmd
+        .replace(/exec tmux attach-session -t 'mide_1_abcd';/, '')
+        .replace(/\btmux /g, `tmux -L ${sock} -f /dev/null `)
+      try {
+        execFileSync('/bin/sh', ['-c', setupOnly], { stdio: 'pipe' })
+        const mouseOpt = execFileSync('tmux', ['-L', sock, 'show-options', '-t', 'mide_1_abcd', 'mouse'], {
+          encoding: 'utf8'
+        }).trim()
+        expect(mouseOpt).toBe('mouse on')
+
+        const copyKeys = execFileSync('tmux', ['-L', sock, 'list-keys', '-T', 'copy-mode'], {
+          encoding: 'utf8'
+        })
+        const upLine = copyKeys.split('\n').find((l) => l.includes('WheelUpPane')) || ''
+        const downLine = copyKeys.split('\n').find((l) => l.includes('WheelDownPane')) || ''
+        expect(upLine).toContain('select-pane')
+        expect(upLine).toContain('scroll-up')
+        expect(downLine).toContain('select-pane')
+        expect(downLine).toContain('scroll-down')
+
+        const viKeys = execFileSync('tmux', ['-L', sock, 'list-keys', '-T', 'copy-mode-vi'], {
+          encoding: 'utf8'
+        })
+        const viUpLine = viKeys.split('\n').find((l) => l.includes('WheelUpPane')) || ''
+        expect(viUpLine).toContain('select-pane')
+        expect(viUpLine).toContain('scroll-up')
+      } finally {
+        try {
+          execFileSync('tmux', ['-L', sock, 'kill-server'], { stdio: 'ignore' })
+        } catch {
+          // ignore
+        }
+      }
+    }
   })
 })
