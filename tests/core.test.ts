@@ -8,7 +8,11 @@ import {
   createDefaultConfig
 } from '../src/main/ssh/configParser'
 import { SshControlMaster } from '../src/main/ssh/controlMaster'
-import { parseOscNotifications, stripEraseScrollback } from '../src/main/terminal/terminalManager'
+import {
+  buildRemoteTmuxBootstrapCommand,
+  parseOscNotifications,
+  stripEraseScrollback
+} from '../src/main/terminal/terminalManager'
 import { UnifiedVfs } from '../src/main/fs/vfs'
 import { TransferManager } from '../src/main/fs/transferManager'
 import { SearchManager, parseGrepLine, parseRgJsonLine, scoreQuickOpenCandidate } from '../src/main/search/searchManager'
@@ -392,5 +396,15 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
     // Explicit disconnect (force: true) removes it immediately
     await cm.disconnect(sshEnv)
     expect(fs.existsSync(ctlPath)).toBe(false)
+  })
+
+  it('enables tmux mouse scrolling and OSC 52 clipboard overrides so TUI apps like agy scroll instead of recalling input history', () => {
+    const cmd = buildRemoteTmuxBootstrapCommand('mide_1_abcd', '/workspace/demo')
+    expect(cmd).toContain("tmux set-option -t 'mide_1_abcd' mouse on")
+    expect(cmd).toContain("tmux set-option -t 'mide_1_abcd' status off")
+    expect(cmd).toContain("tmux set-option -t 'mide_1_abcd' history-limit 50000")
+    expect(cmd).toContain('terminal-overrides')
+    expect(cmd).toContain('set-clipboard on')
+    expect(cmd).toContain('WheelUpPane')
   })
 })

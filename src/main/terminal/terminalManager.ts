@@ -90,6 +90,34 @@ function remoteCdSnippet(targetDir?: string): string {
 }
 
 /**
+ * Builds the remote POSIX shell bootstrap command for persistent per-pane `tmux` sessions:
+ * - Enables `mouse on` so mouse wheel scrolling works natively inside TUI agents (`agy`, vim, htop)
+ *   and scrolls tmux history (`copy-mode -e`) instead of xterm translating wheel-up into Up-Arrow!
+ * - Injects OSC 52 (`Ms`) terminfo override + `set-clipboard on` so remote selection copies to macOS clipboard.
+ * - Hides tmux status bar so each pane looks & feels like a clean native terminal.
+ */
+export function buildRemoteTmuxBootstrapCommand(tmuxSession: string, targetDir?: string): string {
+  const s = shellQuote(tmuxSession)
+  const cdCmd = remoteCdSnippet(targetDir)
+  return (
+    `if command -v tmux >/dev/null 2>&1; then ` +
+    `if ! tmux has-session -t ${s} 2>/dev/null; then ${cdCmd}tmux new-session -d -s ${s}; fi; ` +
+    `tmux set-option -t ${s} status off >/dev/null 2>&1 || true; ` +
+    `tmux set-option -t ${s} mouse on >/dev/null 2>&1 || true; ` +
+    `tmux set-option -t ${s} history-limit 50000 >/dev/null 2>&1 || true; ` +
+    `tmux set-option -as terminal-overrides ',xterm*:Ms=\\E]52;%p1%s;%p2%s\\007' >/dev/null 2>&1 || true; ` +
+    `tmux set-option -s set-clipboard on >/dev/null 2>&1 || true; ` +
+    `tmux set-option -g set-clipboard on >/dev/null 2>&1 || true; ` +
+    `tmux bind-key -T copy-mode WheelUpPane select-pane \\; send-keys -X -N 3 scroll-up >/dev/null 2>&1 || true; ` +
+    `tmux bind-key -T copy-mode WheelDownPane select-pane \\; send-keys -X -N 3 scroll-down >/dev/null 2>&1 || true; ` +
+    `tmux bind-key -T copy-mode-vi WheelUpPane select-pane \\; send-keys -X -N 3 scroll-up >/dev/null 2>&1 || true; ` +
+    `tmux bind-key -T copy-mode-vi WheelDownPane select-pane \\; send-keys -X -N 3 scroll-down >/dev/null 2>&1 || true; ` +
+    `exec tmux attach-session -t ${s}; ` +
+    `else ${cdCmd}exec \${SHELL:-/bin/bash} -l; fi`
+  )
+}
+
+/**
  * Manages local & SSH terminals with cmux-style seamless disconnect/reconnect:
  * - Each terminal pane retains its stable `terminalId` and xterm scrollback across disconnects.
  * - SSH panes automatically use a dedicated per-pane remote `tmux` session (`mide_<shortId>`, status bar hidden)
@@ -216,17 +244,7 @@ export class TerminalManager {
       const cdCmd = remoteCdSnippet(targetDir)
 
       if (managed.tmuxSession) {
-        const s = shellQuote(managed.tmuxSession)
-        // Compatible with tmux 1.8 - 3.5+: creates session in targetDir on first run,
-        // re-attaches live on reconnect without changing cwd or killing processes!
-        const remoteCmd =
-          `if command -v tmux >/dev/null 2>&1; then ` +
-          `if ! tmux has-session -t ${s} 2>/dev/null; then ${cdCmd}tmux new-session -d -s ${s}; fi; ` +
-          `tmux set-option -t ${s} status off >/dev/null 2>&1 || true; ` +
-          `tmux set-option -t ${s} history-limit 50000 >/dev/null 2>&1 || true; ` +
-          `tmux set-option -s set-clipboard on >/dev/null 2>&1 || true; ` +
-          `exec tmux attach-session -t ${s}; ` +
-          `else ${cdCmd}exec \${SHELL:-/bin/bash} -l; fi`
+        const remoteCmd = buildRemoteTmuxBootstrapCommand(managed.tmuxSession, targetDir)
         args = [...baseArgs, '-t', dest, remoteCmd]
       } else if (cdCmd) {
         const remoteCmd = `${cdCmd}exec \${SHELL:-/bin/bash} -l`

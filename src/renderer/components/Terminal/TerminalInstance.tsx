@@ -130,6 +130,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
       cursorBlink: true,
       cursorStyle: 'block',
       macOptionIsMeta: true,
+      macOptionClickForcesSelection: true,
       scrollback: 15000,
       theme: getXtermTheme(initState.theme)
     })
