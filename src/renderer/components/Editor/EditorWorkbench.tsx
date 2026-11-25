@@ -3,6 +3,7 @@ import * as monaco from 'monaco-editor'
 import { Allotment } from 'allotment'
 import { GitCompare, Save, X } from 'lucide-react'
 import { type EditorTab, useAppStore } from '@renderer/stores/useAppStore'
+import { registerMonacoEditor, unregisterMonacoEditor } from '@renderer/utils/clipboardBridge'
 import { bindSublimeKeybindings, getMonacoThemeName, initMonacoSublime } from './monacoSetup'
 
 initMonacoSublime()
@@ -53,7 +54,23 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
         minimap: { enabled: false }
       })
       diffEditorRef.current = diffEd
+      const origEd = diffEd.getOriginalEditor()
+      const modEd = diffEd.getModifiedEditor()
+      registerMonacoEditor(`pane-${group}-orig`, origEd)
+      registerMonacoEditor(`pane-${group}-mod`, modEd)
+      const subOrigFocus = origEd.onDidFocusEditorText(() => {
+        setEditorFocusGroup(group)
+        setActiveFocusArea('editor')
+      })
+      const subModFocus = modEd.onDidFocusEditorText(() => {
+        setEditorFocusGroup(group)
+        setActiveFocusArea('editor')
+      })
       return () => {
+        subOrigFocus.dispose()
+        subModFocus.dispose()
+        unregisterMonacoEditor(`pane-${group}-orig`, origEd)
+        unregisterMonacoEditor(`pane-${group}-mod`, modEd)
         diffEd.dispose()
         diffEditorRef.current = null
       }
@@ -124,8 +141,10 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
     })
 
     editorRef.current = ed
+    registerMonacoEditor(`pane-${group}`, ed)
 
     return () => {
+      unregisterMonacoEditor(`pane-${group}`, ed)
       subChange.dispose()
       subCursor.dispose()
       subFocus.dispose()

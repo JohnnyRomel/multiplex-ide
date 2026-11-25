@@ -29,6 +29,23 @@ const api = {
     }
   },
 
+  // System Clipboard & Native Edit
+  readClipboardText: (): string => {
+    const val = ipcRenderer.sendSync(IPC.CLIPBOARD_READ_TEXT)
+    return typeof val === 'string' ? val : ''
+  },
+  writeClipboardText: (text: string): void => {
+    ipcRenderer.send(IPC.CLIPBOARD_WRITE_TEXT, text)
+  },
+  execNativeEdit: (action: 'cut' | 'copy' | 'paste' | 'selectAll'): void => {
+    ipcRenderer.send(IPC.CLIPBOARD_NATIVE_EDIT, action)
+  },
+  onClipboardAction: (cb: (action: 'cut' | 'copy' | 'paste' | 'selectAll') => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, action: 'cut' | 'copy' | 'paste' | 'selectAll') => cb(action)
+    ipcRenderer.on(IPC.CLIPBOARD_ACTION, handler)
+    return () => ipcRenderer.removeListener(IPC.CLIPBOARD_ACTION, handler)
+  },
+
   // Config & Environments
   getConfigInfo: (): Promise<{
     configPath: string

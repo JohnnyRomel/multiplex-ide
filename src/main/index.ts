@@ -1,4 +1,5 @@
-import { app, BrowserWindow, Menu, powerMonitor, shell } from 'electron'
+import { app, BrowserWindow, Menu, nativeImage, powerMonitor, session, shell, webContents } from 'electron'
+import fs from 'fs'
 import path from 'path'
 import { IPC } from '@shared/ipc'
 import { EnvironmentRegistry } from './ssh/configParser'
@@ -23,13 +24,29 @@ function sendToRenderer(channel: string, ...args: any[]): void {
   }
 }
 
+function resolveAppIconPath(): string | undefined {
+  const candidates = [
+    path.join(app.getAppPath(), 'resources', 'icon.png'),
+    path.join(process.resourcesPath || '', 'icon.png'),
+    path.resolve(__dirname, '../../resources/icon.png')
+  ]
+  for (const p of candidates) {
+    if (p && fs.existsSync(p)) return p
+  }
+  return undefined
+}
+
 function createWindow(): void {
+  const iconPath = resolveAppIconPath()
+  const windowIcon = iconPath ? nativeImage.createFromPath(iconPath) : undefined
+
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 920,
     minWidth: 960,
     minHeight: 620,
     title: 'MultiplexIDE',
+    icon: windowIcon && !windowIcon.isEmpty() ? windowIcon : undefined,
     backgroundColor: '#272822', // Classic Sublime Text 3 Monokai canvas
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 12 },
@@ -57,6 +74,20 @@ function createWindow(): void {
   })
 }
 
+function dispatchEditAction(action: 'cut' | 'copy' | 'paste' | 'selectAll'): void {
+  const focused = webContents.getFocusedWebContents()
+  if (!focused || focused.isDestroyed()) return
+  if (mainWindow && !mainWindow.isDestroyed() && focused.id === mainWindow.webContents.id) {
+    focused.send(IPC.CLIPBOARD_ACTION, action)
+    return
+  }
+  // DevTools or secondary windows use native Chromium edit commands directly
+  if (action === 'copy') focused.copy()
+  else if (action === 'cut') focused.cut()
+  else if (action === 'paste') focused.paste()
+  else if (action === 'selectAll') focused.selectAll()
+}
+
 function buildMacMenu(): void {
   const template: Electron.MenuItemConstructorOptions[] = [
     {
@@ -79,10 +110,10 @@ function buildMacMenu(): void {
         { role: 'undo' },
         { role: 'redo' },
         { type: 'separator' },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
-        { role: 'selectAll' }
+        { label: 'Cut', accelerator: 'CmdOrCtrl+X', click: () => dispatchEditAction('cut') },
+        { label: 'Copy', accelerator: 'CmdOrCtrl+C', click: () => dispatchEditAction('copy') },
+        { label: 'Paste', accelerator: 'CmdOrCtrl+V', click: () => dispatchEditAction('paste') },
+        { label: 'Select All', accelerator: 'CmdOrCtrl+A', click: () => dispatchEditAction('selectAll') }
       ]
     },
     {
@@ -105,6 +136,31 @@ function buildMacMenu(): void {
 
 app.whenReady().then(() => {
   app.setName('MultiplexIDE')
+
+  // Apply custom macOS Dock icon immediately (visible in both dev mode and packaged builds)
+  if (process.platform === 'darwin' && app.dock) {
+    const iconPath = resolveAppIconPath()
+    if (iconPath) {
+      const dockIcon = nativeImage.createFromPath(iconPath)
+      if (!dockIcon.isEmpty()) {
+        app.dock.setIcon(dockIcon)
+      }
+    }
+  }
+
+  // Always allow clipboard read/write so Monaco & web widgets stay synced with macOS pasteboard
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
+    if (permission === 'clipboard-read' || permission === 'clipboard-sanitized-write') return true
+    return true
+  })
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    if (permission === 'clipboard-read' || permission === 'clipboard-sanitized-write') {
+      callback(true)
+      return
+    }
+    callback(false)
+  })
+
   buildMacMenu()
 
   registry = new EnvironmentRegistry(app.getPath('userData'))

@@ -7,6 +7,11 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import { Columns2, RotateCw, Rows2, Search, WifiOff, X } from 'lucide-react'
 import type { EditorThemeId } from '@shared/types'
 import { useAppStore } from '@renderer/stores/useAppStore'
+import {
+  decodeOsc52Payload,
+  registerTerminalInstance,
+  unregisterTerminalInstance
+} from '@renderer/utils/clipboardBridge'
 
 function getXtermTheme(theme: EditorThemeId) {
   if (theme === 'mariana') {
@@ -108,6 +113,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
 
   const [showFind, setShowFind] = useState(false)
   const [findText, setFindText] = useState('')
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const isFocused = focusedTerminalId === terminalId
   const connState = termStatus?.state || (env?.kind === 'local' ? 'connected' : 'connecting')
 
@@ -147,6 +153,16 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     xtermRef.current = term
     fitRef.current = fitAddon
     searchRef.current = searchAddon
+    registerTerminalInstance(terminalId, term)
+
+    // Support OSC 52 so copying inside remote tmux / vim / neovim syncs straight to macOS clipboard!
+    const osc52Disposable = term.parser.registerOscHandler(52, (data) => {
+      const decoded = decodeOsc52Payload(data)
+      if (decoded !== null) {
+        window.multiplex.writeClipboardText(decoded)
+      }
+      return true
+    })
 
     const doFit = () => {
       if (!el.offsetWidth || !el.offsetHeight) return
@@ -175,8 +191,22 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     })
     observer.observe(el)
 
-    // Pass app-level Cmd shortcuts through to window listener cleanly!
+    // Pass app-level Cmd shortcuts through cleanly + support Ctrl+Shift+C / Ctrl+Shift+V
     term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey) {
+        const k = ev.key.toLowerCase()
+        if (k === 'c') {
+          if (term.hasSelection()) {
+            window.multiplex.writeClipboardText(term.getSelection())
+          }
+          return false
+        }
+        if (k === 'v') {
+          const text = window.multiplex.readClipboardText()
+          if (text) term.paste(text)
+          return false
+        }
+      }
       if (ev.type === 'keydown' && ev.metaKey) {
         const k = ev.key.toLowerCase()
         if (!ev.shiftKey && !ev.altKey && k === 'f') {
@@ -188,6 +218,10 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
           return false
         }
         if (
+          k === 'c' ||
+          k === 'v' ||
+          k === 'x' ||
+          k === 'a' ||
           k === 'p' ||
           k === 't' ||
           k === 'w' ||
@@ -212,6 +246,8 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     })
 
     return () => {
+      unregisterTerminalInstance(terminalId, term)
+      osc52Disposable.dispose()
       observer.disconnect()
       onDataDisposable.dispose()
       offIpcData()
@@ -258,6 +294,17 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
       })
     }
   }, [isVisible, isFocused, terminalId])
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const close = () => setContextMenu(null)
+    window.addEventListener('click', close)
+    window.addEventListener('blur', close)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('blur', close)
+    }
+  }, [contextMenu])
 
   const handleDropPath = (e: React.DragEvent) => {
     e.preventDefault()
@@ -474,7 +521,100 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
         </div>
       )}
 
-      <div ref={containerRef} className="flex-1 min-h-0 w-full overflow-hidden" />
+      <div
+        ref={containerRef}
+        className="flex-1 min-h-0 w-full overflow-hidden"
+        onContextMenu={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          setFocusedPane(envId, tabId, paneId, terminalId)
+          setContextMenu({ x: e.clientX, y: e.clientY })
+        }}
+      />
+
+      {contextMenu && (
+        <div
+          className="fixed z-50 min-w-[185px] rounded border py-1 shadow-2xl text-[12.5px] select-none"
+          style={{
+            left: Math.min(contextMenu.x, window.innerWidth - 200),
+            top: Math.min(contextMenu.y, window.innerHeight - 230),
+            backgroundColor: 'var(--st-panel)',
+            borderColor: 'var(--st-border-light)',
+            color: 'var(--st-text)'
+          }}
+        >
+          <button
+            onClick={() => {
+              const sel = xtermRef.current?.getSelection()
+              if (sel) window.multiplex.writeClipboardText(sel)
+              xtermRef.current?.focus()
+              setContextMenu(null)
+            }}
+            disabled={!xtermRef.current?.hasSelection()}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left hover:bg-white/10 disabled:opacity-40"
+          >
+            <span>Copy</span>
+            <span className="font-mono text-[11px] opacity-60">⌘C</span>
+          </button>
+          <button
+            onClick={() => {
+              const text = window.multiplex.readClipboardText()
+              if (text) xtermRef.current?.paste(text)
+              xtermRef.current?.focus()
+              setContextMenu(null)
+            }}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left hover:bg-white/10"
+          >
+            <span>Paste</span>
+            <span className="font-mono text-[11px] opacity-60">⌘V</span>
+          </button>
+          <button
+            onClick={() => {
+              xtermRef.current?.selectAll()
+              xtermRef.current?.focus()
+              setContextMenu(null)
+            }}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left hover:bg-white/10"
+          >
+            <span>Select All</span>
+            <span className="font-mono text-[11px] opacity-60">⌘A</span>
+          </button>
+          <button
+            onClick={() => {
+              xtermRef.current?.clear()
+              xtermRef.current?.focus()
+              setContextMenu(null)
+            }}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left hover:bg-white/10"
+          >
+            <span>Clear Terminal</span>
+            <span className="font-mono text-[11px] opacity-60">⌘K</span>
+          </button>
+          <div className="my-1 border-t" style={{ borderColor: 'var(--st-border)' }} />
+          <button
+            onClick={() => {
+              setFocusedPane(envId, tabId, paneId, terminalId)
+              void splitTerminal(envId, 'horizontal')
+              setContextMenu(null)
+            }}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left hover:bg-white/10"
+          >
+            <span>Split Right</span>
+            <span className="font-mono text-[11px] opacity-60">⌘\</span>
+          </button>
+          <button
+            onClick={() => {
+              setFocusedPane(envId, tabId, paneId, terminalId)
+              void splitTerminal(envId, 'vertical')
+              setContextMenu(null)
+            }}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left hover:bg-white/10"
+          >
+            <span>Split Down</span>
+            <span className="font-mono text-[11px] opacity-60">⌘⇧\</span>
+          </button>
+        </div>
+      )}
     </div>
   )
 }

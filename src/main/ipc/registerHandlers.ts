@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain, nativeImage, shell } from 'electron'
+import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
 import path from 'path'
 import type {
   CustomHostInput,
@@ -330,5 +330,23 @@ export function registerIpcHandlers(services: MainServices): void {
 
   ipcMain.handle(IPC.SEARCH_FILES_CANCEL, (_e, requestId: string) => {
     searchManager.cancelFileQuery(requestId)
+  })
+
+  // --- System Clipboard & Native Edit ---
+  ipcMain.on(IPC.CLIPBOARD_READ_TEXT, (event) => {
+    event.returnValue = clipboard.readText()
+  })
+
+  ipcMain.on(IPC.CLIPBOARD_WRITE_TEXT, (_event, text: string) => {
+    clipboard.writeText(typeof text === 'string' ? text : '')
+  })
+
+  ipcMain.on(IPC.CLIPBOARD_NATIVE_EDIT, (event, action: 'cut' | 'copy' | 'paste' | 'selectAll') => {
+    const sender = event.sender
+    if (!sender || sender.isDestroyed()) return
+    if (action === 'copy') sender.copy()
+    else if (action === 'cut') sender.cut()
+    else if (action === 'paste') sender.paste()
+    else if (action === 'selectAll') sender.selectAll()
   })
 }

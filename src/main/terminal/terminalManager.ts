@@ -192,6 +192,7 @@ export class TerminalManager {
           `if ! tmux has-session -t ${s} 2>/dev/null; then ${cdCmd}tmux new-session -d -s ${s}; fi; ` +
           `tmux set-option -t ${s} status off >/dev/null 2>&1 || true; ` +
           `tmux set-option -t ${s} history-limit 50000 >/dev/null 2>&1 || true; ` +
+          `tmux set-option -s set-clipboard on >/dev/null 2>&1 || true; ` +
           `exec tmux attach-session -t ${s}; ` +
           `else ${cdCmd}exec \${SHELL:-/bin/bash} -l; fi`
         args = [...baseArgs, '-t', dest, remoteCmd]

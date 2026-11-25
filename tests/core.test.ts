@@ -13,6 +13,7 @@ import { UnifiedVfs } from '../src/main/fs/vfs'
 import { TransferManager } from '../src/main/fs/transferManager'
 import { SearchManager, parseGrepLine, parseRgJsonLine, scoreQuickOpenCandidate } from '../src/main/search/searchManager'
 import { enhancedCppLanguage, enhancedPythonLanguage } from '../src/shared/syntaxGrammars'
+import { decodeOsc52Payload } from '../src/shared/osc52'
 // @ts-expect-error internal monaco esm module for unit testing Monarch compilation
 import { compile } from 'monaco-editor/esm/vs/editor/standalone/common/monarch/monarchCompile.js'
 import type { Environment, SearchDoneEvent, SearchMatch, TransferTask } from '../src/shared/types'
@@ -334,5 +335,19 @@ describe('Enhanced Non-LSP C++ and Python Monarch Grammars', () => {
     const compiledPy = compile('python', enhancedPythonLanguage)
     expect(compiledPy.tokenPostfix).toBe('.python')
     expect(compiledPy.tokenizer.root.length).toBeGreaterThan(10)
+  })
+})
+
+describe('OSC 52 Remote Clipboard Decoding', () => {
+  it('decodes ASCII and UTF-8 Chinese OSC 52 payloads and ignores queries/invalid inputs', () => {
+    const asciiB64 = Buffer.from('hello multiplex', 'utf8').toString('base64')
+    expect(decodeOsc52Payload(`c;${asciiB64}`)).toBe('hello multiplex')
+
+    const utf8B64 = Buffer.from('你好 MultiplexIDE 剪贴板！', 'utf8').toString('base64')
+    expect(decodeOsc52Payload(`c;${utf8B64}`)).toBe('你好 MultiplexIDE 剪贴板！')
+
+    expect(decodeOsc52Payload('c;?')).toBeNull()
+    expect(decodeOsc52Payload('invalid-no-semicolon')).toBeNull()
+    expect(decodeOsc52Payload('c;!!!not-base64!!!')).toBeNull()
   })
 })

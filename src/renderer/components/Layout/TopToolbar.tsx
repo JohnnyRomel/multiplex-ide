@@ -54,7 +54,7 @@ export const TopToolbar: React.FC = () => {
 
   return (
     <header
-      className="drag-region flex h-[38px] shrink-0 items-center justify-between border-b pl-[80px] pr-3"
+      className="drag-region flex h-[38px] shrink-0 items-center justify-between border-b pl-[80px] pr-3 select-none"
       style={{ backgroundColor: 'var(--st-titlebar)', borderColor: 'var(--st-border)' }}
     >
       {/* Left: Quick Workspace Tabs (always visible for instant switching between workspaces!) */}

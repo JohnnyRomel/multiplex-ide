@@ -10,6 +10,7 @@ import { EditorWorkbench } from './components/Editor/EditorWorkbench'
 import { QuickOpenModal } from './components/Editor/QuickOpenModal'
 import { TerminalWorkspaceArea } from './components/Terminal/TerminalPaneTree'
 import { GlobalSearchPanel } from './components/Search/GlobalSearchPanel'
+import { handleClipboardAction } from './utils/clipboardBridge'
 
 export default function App() {
   const theme = useAppStore((s) => s.theme)
@@ -90,7 +91,8 @@ export default function App() {
       window.multiplex.onTerminalNotification((n) => pushNotification(n)),
       window.multiplex.onTransferUpdate((task) => upsertTransfer(task)),
       window.multiplex.onSearchMatchBatch((batch) => appendSearchMatches(batch)),
-      window.multiplex.onSearchDone((done) => finishGlobalSearch(done))
+      window.multiplex.onSearchDone((done) => finishGlobalSearch(done)),
+      window.multiplex.onClipboardAction((action) => handleClipboardAction(action))
     ]
 
     return () => {
