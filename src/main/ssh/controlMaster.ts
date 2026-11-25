@@ -5,6 +5,38 @@ import os from 'os'
 import path from 'path'
 import type { Environment } from '@shared/types'
 
+/**
+ * Ensures OpenSSH ProxyCommand helpers (Homebrew binaries, ~/.local/bin, or custom dirs from local config)
+ * are always discoverable even when MultiplexIDE is launched from macOS Finder/Dock.
+ */
+let configuredExtraPathDirs: string[] = []
+
+export function setConfiguredExtraPathDirs(dirs: string[]): void {
+  configuredExtraPathDirs = dirs.filter(Boolean)
+}
+
+export function buildEnrichedEnv(): NodeJS.ProcessEnv {
+  const home = os.homedir()
+  const extraPaths = [
+    ...configuredExtraPathDirs,
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    path.join(home, '.local/bin'),
+    path.join(home, '.cargo/bin'),
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin'
+  ]
+  const current = process.env.PATH ? process.env.PATH.split(':') : []
+  const merged = Array.from(new Set([...extraPaths, ...current])).join(':')
+  return {
+    ...process.env,
+    PATH: merged
+  }
+}
+
 export class SshControlMaster {
   private ctlDir: string
   private homeCache = new Map<string, string>()
@@ -26,17 +58,17 @@ export class SshControlMaster {
       '-o', `ControlPath=${ctlPath}`,
       '-o', 'ControlMaster=auto',
       '-o', 'ControlPersist=600',
-      '-o', 'ServerAliveInterval=30',
-      '-o', 'ServerAliveCountMax=3'
+      '-o', 'ServerAliveInterval=20',
+      '-o', 'ServerAliveCountMax=3',
+      '-o', 'TCPKeepAlive=yes'
     ]
 
     if (opts?.batchMode) {
-      args.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10')
+      args.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=12')
     } else if (!opts?.interactive) {
       args.push('-o', 'ConnectTimeout=15')
     }
 
-    // Only pass explicit -p / -J / -i if not delegating to ~/.ssh/config alias
     if (env.source !== 'ssh-config') {
       if (env.port && env.port !== 22) {
         args.push('-p', String(env.port))
@@ -53,7 +85,6 @@ export class SshControlMaster {
   }
 
   getSshDestination(env: Environment): string {
-    // If backed by ~/.ssh/config alias (or host equals alias without explicit custom hostname override), pass alias directly
     if (env.source === 'ssh-config' && env.host) {
       return env.host
     }
@@ -71,17 +102,38 @@ export class SshControlMaster {
 
     return new Promise((resolve) => {
       execFile(
-        'ssh',
+        '/usr/bin/ssh',
         ['-O', 'check', '-o', `ControlPath=${ctlPath}`, this.getSshDestination(env)],
-        { timeout: 4000 },
+        { timeout: 3000, env: buildEnrichedEnv() },
         (err) => resolve(!err)
       )
     })
   }
 
   /**
-   * Ensures an active ControlMaster connection exists (auto-connects silently if SSH keys/agent allow).
+   * Tears down a stale or dead ControlMaster socket (critical after macOS sleep/wake or VPN changes
+   * so reconnecting terminals don't hang on a half-open dead socket!).
    */
+  async resetControlSocket(env: Environment): Promise<void> {
+    if (env.kind === 'local') return
+    const ctlPath = this.getControlPath(env)
+    if (!fs.existsSync(ctlPath)) return
+
+    await new Promise<void>((resolve) => {
+      execFile(
+        '/usr/bin/ssh',
+        ['-O', 'exit', '-o', `ControlPath=${ctlPath}`, this.getSshDestination(env)],
+        { timeout: 2500, env: buildEnrichedEnv() },
+        () => resolve()
+      )
+    })
+    try {
+      if (fs.existsSync(ctlPath)) fs.unlinkSync(ctlPath)
+    } catch {
+      // ignore unlink race
+    }
+  }
+
   async ensureConnected(env: Environment): Promise<boolean> {
     if (env.kind === 'local') return true
     if (await this.isConnected(env)) return true
@@ -89,65 +141,86 @@ export class SshControlMaster {
     return res.ok
   }
 
+  /**
+   * Connects like VS Code Remote-SSH:
+   * 1. Cleans up any stale control socket if check failed.
+   * 2. Attempts `-f -N` ControlMaster bootstrap (works for standard OpenSSH hosts).
+   * 3. Falls back to `ssh <baseArgs> <dest> 'printf __MIDE_OK__'` for bastion / container gateways
+   *    whose ProxyCommand or sshd rejects `-N` without an exec channel!
+   */
   async connect(env: Environment): Promise<{ ok: boolean; needsInteractiveAuth?: boolean; error?: string }> {
     if (env.kind === 'local') return { ok: true }
     if (await this.isConnected(env)) return { ok: true }
 
-    const args = [
-      ...this.buildBaseSshArgs(env, { batchMode: true }),
-      '-f',
-      '-N',
-      this.getSshDestination(env)
-    ]
+    // Clear stale socket file before fresh dial
+    await this.resetControlSocket(env)
 
-    return new Promise((resolve) => {
-      const child = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'] })
-      let stderr = ''
-      child.stderr.on('data', (chunk) => {
-        stderr += chunk.toString()
-      })
-      const timer = setTimeout(() => {
-        child.kill('SIGTERM')
-        resolve({ ok: false, error: 'SSH connection timed out' })
-      }, 12000)
+    const envVars = buildEnrichedEnv()
+    const dest = this.getSshDestination(env)
+    const runProbe = (
+      extraArgs: string[],
+      remoteCmd?: string
+    ): Promise<{ code: number; stdout: string; stderr: string }> =>
+      new Promise((resolve) => {
+        const args = [
+          ...this.buildBaseSshArgs(env, { batchMode: true }),
+          ...extraArgs,
+          dest,
+          ...(remoteCmd ? [remoteCmd] : [])
+        ]
+        const child = spawn('/usr/bin/ssh', args, { stdio: ['ignore', 'pipe', 'pipe'], env: envVars })
+        let stdout = ''
+        let stderr = ''
+        child.stdout.on('data', (c) => (stdout += c.toString()))
+        child.stderr.on('data', (c) => (stderr += c.toString()))
+        const timer = setTimeout(() => {
+          child.kill('SIGTERM')
+          resolve({ code: 124, stdout, stderr: stderr || 'SSH connection timed out' })
+        }, 15000)
 
-      child.on('exit', (code) => {
-        clearTimeout(timer)
-        if (code === 0) {
-          resolve({ ok: true })
-        } else {
-          const authHint =
-            /permission denied|keyboard-interactive|passphrase|password|verification code|host key verification/i.test(
-              stderr
-            )
-          resolve({
-            ok: false,
-            needsInteractiveAuth: authHint,
-            error: stderr.trim() || `SSH exited with code ${code}`
-          })
-        }
+        child.on('exit', (code) => {
+          clearTimeout(timer)
+          resolve({ code: code ?? 1, stdout, stderr })
+        })
+        child.on('error', (err) => {
+          clearTimeout(timer)
+          resolve({ code: 1, stdout, stderr: err.message })
+        })
       })
-      child.on('error', (err) => {
-        clearTimeout(timer)
-        resolve({ ok: false, error: err.message })
-      })
-    })
+
+    // Try 1: Fast background master (-f -N)
+    const first = await runProbe(['-f', '-N'])
+    if (first.code === 0) return { ok: true }
+
+    const authHint = (text: string) =>
+      /permission denied|keyboard-interactive|passphrase|password|verification code|host key verification/i.test(text)
+
+    if (authHint(first.stderr)) {
+      return { ok: false, needsInteractiveAuth: true, error: first.stderr.trim() }
+    }
+
+    // Try 2: Exec probe (compatible with container / bastion proxies that disallow `-N`)
+    const second = await runProbe(['-T'], 'printf __MIDE_OK__').catch(() => ({
+      code: 1,
+      stdout: '',
+      stderr: ''
+    }))
+    if (second.code === 0 && second.stdout.includes('__MIDE_OK__')) {
+      return { ok: true }
+    }
+
+    const errMsg = (second.stderr || first.stderr).trim() || `SSH exited with code ${first.code}`
+    return {
+      ok: false,
+      needsInteractiveAuth: authHint(errMsg),
+      error: errMsg
+    }
   }
 
   async disconnect(env: Environment): Promise<void> {
     if (env.kind === 'local') return
     this.homeCache.delete(env.id)
-    const ctlPath = this.getControlPath(env)
-    if (!fs.existsSync(ctlPath)) return
-
-    await new Promise<void>((resolve) => {
-      execFile(
-        'ssh',
-        ['-O', 'exit', '-o', `ControlPath=${ctlPath}`, this.getSshDestination(env)],
-        { timeout: 3000 },
-        () => resolve()
-      )
-    })
+    await this.resetControlSocket(env)
   }
 
   async exec(
@@ -162,7 +235,10 @@ export class SshControlMaster {
     ]
 
     return new Promise((resolve, reject) => {
-      const child = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn('/usr/bin/ssh', args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: buildEnrichedEnv()
+      })
       let stdout = ''
       let stderr = ''
       const timer = opts?.timeoutMs
@@ -230,7 +306,7 @@ export class SshControlMaster {
       this.getSshDestination(env),
       'sftp'
     ]
-    return spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    return spawn('/usr/bin/ssh', args, { stdio: ['pipe', 'pipe', 'pipe'], env: buildEnrichedEnv() })
   }
 
   spawnRemoteCommand(env: Environment, command: string) {
@@ -239,7 +315,7 @@ export class SshControlMaster {
       this.getSshDestination(env),
       command
     ]
-    return spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    return spawn('/usr/bin/ssh', args, { stdio: ['pipe', 'pipe', 'pipe'], env: buildEnrichedEnv() })
   }
 
   async cleanupAll(envs: Environment[]): Promise<void> {

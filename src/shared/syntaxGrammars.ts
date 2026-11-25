@@ -3,7 +3,7 @@
  * Highlight scopes:
  * - keyword / keyword.directive
  * - type / type.identifier
- * - namespace (std::, tiktok::monarch::)
+ * - namespace (std::, my_app::core::)
  * - entity.name.function (definitions & calls)
  * - support.function / support.function.magic (__init__, len, move, make_shared)
  * - variable.language (self, cls, this)
@@ -86,7 +86,7 @@ export const enhancedCppLanguage: any = {
       [/(?:u8|u|U|L)?"/, { token: 'string.quote', next: '@string' }],
       [/(?:u8|u|U|L)?'/, { token: 'string.quote', next: '@char' }],
 
-      // Namespace prefix (std::, tiktok::monarch::)
+      // Namespace prefix (std::, my_app::core::)
       [/[a-zA-Z_]\w*(?=\s*::)/, 'namespace'],
 
       // Template function calls: make_shared<Foo>(...)

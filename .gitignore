@@ -5,7 +5,9 @@ dist/
 *.log
 .vite/
 *.tsbuildinfo
+
+# Local private workspace configuration (never commit!)
+multiplex.local.json
+*.local.json
 .env
-.env.local
-.env.*.local
-release/
+.env.*

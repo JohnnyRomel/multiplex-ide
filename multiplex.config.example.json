@@ -1,0 +1,35 @@
+{
+  "theme": "monokai",
+  "showAllSshConfigHosts": false,
+  "extraPathDirs": [],
+  "workspaces": [
+    {
+      "id": "local",
+      "name": "Local",
+      "kind": "local",
+      "defaultPath": "~",
+      "color": "#66d9ef",
+      "pinned": true
+    },
+    {
+      "id": "ssh:dev-server",
+      "name": "dev-server",
+      "kind": "ssh",
+      "host": "dev-server",
+      "defaultPath": "~/workspace",
+      "color": "#a6e22e",
+      "useTmux": true,
+      "pinned": true
+    },
+    {
+      "id": "ssh:gpu-box",
+      "name": "gpu-box",
+      "kind": "ssh",
+      "host": "gpu-box",
+      "defaultPath": "~",
+      "color": "#fd971f",
+      "useTmux": true,
+      "pinned": true
+    }
+  ]
+}

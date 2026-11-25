@@ -30,6 +30,7 @@ export default function App() {
   const upsertEnvironment = useAppStore((s) => s.upsertEnvironment)
   const ensureTerminalForEnv = useAppStore((s) => s.ensureTerminalForEnv)
   const handleTerminalExited = useAppStore((s) => s.handleTerminalExited)
+  const setTerminalStatus = useAppStore((s) => s.setTerminalStatus)
   const pushNotification = useAppStore((s) => s.pushNotification)
   const upsertTransfer = useAppStore((s) => s.upsertTransfer)
   const setTransfers = useAppStore((s) => s.setTransfers)
@@ -70,6 +71,7 @@ export default function App() {
       }),
       window.multiplex.onEnvStatusChanged((env) => upsertEnvironment(env)),
       window.multiplex.onTerminalExit((terminalId, envId) => handleTerminalExited(terminalId, envId)),
+      window.multiplex.onTerminalStatus((status) => setTerminalStatus(status)),
       window.multiplex.onTerminalNotification((n) => pushNotification(n)),
       window.multiplex.onTransferUpdate((task) => upsertTransfer(task)),
       window.multiplex.onSearchMatchBatch((batch) => appendSearchMatches(batch)),

@@ -9,7 +9,7 @@ import type {
 } from '@shared/types'
 import { IPC } from '@shared/ipc'
 import type { EnvironmentRegistry } from '../ssh/configParser'
-import type { SshControlMaster } from '../ssh/controlMaster'
+import { setConfiguredExtraPathDirs, type SshControlMaster } from '../ssh/controlMaster'
 import type { TerminalManager } from '../terminal/terminalManager'
 import type { UnifiedVfs } from '../fs/vfs'
 import type { TransferManager } from '../fs/transferManager'
@@ -46,6 +46,7 @@ export function registerIpcHandlers(services: MainServices): void {
 
   const broadcastConfigUpdated = () => {
     const reloaded = registry.reloadFromDisk()
+    setConfiguredExtraPathDirs(registry.getExtraPathDirs())
     const win = getMainWindow()
     if (win && !win.isDestroyed()) {
       win.webContents.send(IPC.CONFIG_UPDATED, reloaded)
@@ -116,7 +117,8 @@ export function registerIpcHandlers(services: MainServices): void {
   ipcMain.handle(IPC.ENV_DISCONNECT, async (_e, envId: string) => {
     const env = requireEnv(envId)
     if (env.kind === 'ssh') {
-      terminalManager.killAllForEnv(envId)
+      // Preserve terminal panes & xterm scrollback instead of destroying them!
+      terminalManager.disconnectEnv(envId)
       vfs.disposeEnv(envId)
       await controlMaster.disconnect(env)
       registry.setStatus(envId, 'disconnected', undefined)
@@ -155,7 +157,11 @@ export function registerIpcHandlers(services: MainServices): void {
   })
 
   ipcMain.handle(IPC.TERM_KILL, (_e, terminalId: string) => {
-    terminalManager.kill(terminalId)
+    terminalManager.kill(terminalId, { destroyRemoteSession: true })
+  })
+
+  ipcMain.handle(IPC.TERM_RECONNECT, async (_e, terminalId: string, forceReset = true) => {
+    await terminalManager.reconnect(terminalId, { forceReset })
   })
 
   // --- Unified VFS ---

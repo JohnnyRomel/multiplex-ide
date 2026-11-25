@@ -1,8 +1,8 @@
-import { app, BrowserWindow, Menu, shell } from 'electron'
+import { app, BrowserWindow, Menu, powerMonitor, shell } from 'electron'
 import path from 'path'
 import { IPC } from '@shared/ipc'
 import { EnvironmentRegistry } from './ssh/configParser'
-import { SshControlMaster } from './ssh/controlMaster'
+import { SshControlMaster, setConfiguredExtraPathDirs } from './ssh/controlMaster'
 import { TerminalManager } from './terminal/terminalManager'
 import { UnifiedVfs } from './fs/vfs'
 import { TransferManager } from './fs/transferManager'
@@ -112,6 +112,7 @@ app.whenReady().then(() => {
   buildMacMenu()
 
   registry = new EnvironmentRegistry(app.getPath('userData'))
+  setConfiguredExtraPathDirs(registry.getExtraPathDirs())
   controlMaster = new SshControlMaster()
   vfs = new UnifiedVfs(controlMaster)
 
@@ -123,8 +124,14 @@ app.whenReady().then(() => {
   terminalManager = new TerminalManager(controlMaster, {
     onData: (terminalId, data) => sendToRenderer(IPC.TERM_DATA, terminalId, data),
     onExit: (terminalId, envId, exitCode) => sendToRenderer(IPC.TERM_EXIT, terminalId, envId, exitCode),
+    onStatus: (status) => sendToRenderer(IPC.TERM_STATUS, status),
     onNotification: (notification) => sendToRenderer(IPC.TERM_NOTIFICATION, notification),
     onSshConnected: markConnected
+  })
+
+  // Automatically recover SSH terminals after macOS wakes from sleep (cmux-style resilience!)
+  powerMonitor.on('resume', () => {
+    void terminalManager.handleSystemResume()
   })
 
   transferManager = new TransferManager(vfs, (task) => {

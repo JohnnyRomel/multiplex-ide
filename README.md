@@ -1,72 +1,73 @@
 # MultiplexIDE
 
-macOS 一体化多环境开发工具：**Sublime Text 3** 极简视觉与主题（Monokai / Mariana / Boxy Dark）+ **cmux** 多环境分屏终端 + **多环境全局搜索 & Goto Files** + **无侵入 SSH/SFTP 双向拖拽文件传输**。
+A macOS all-in-one multi-environment developer workspace that unifies **Sublime Text 3** aesthetics & speed, **cmux**-style multi-environment split terminals with automatic reconnect, **cross-environment global search & Goto Anything**, and **agentless SSH/SFTP drag-and-drop file transfer**.
 
-## 配置文件说明 (`~/.config/multiplex-ide/config.json`)
+## Features
 
-首次启动自动生成配置文件，默认仅展示 **本机 (`Local Mac`)**、**`dev92` (`~/workspace`)**、**`cn_a10` (`~`)** 三个工作区（不会将 `~/.ssh/config` 中所有主机全部铺满侧边栏，但仍会自动从 `~/.ssh/config` 读取对应主机的 `HostName`、`User`、`Port`、`ProxyJump` 配置）。
+- **Multi-Environment Workspaces (`Local` + SSH)**: Manage local and multiple remote SSH targets inside one window (`⌘ 1` .. `⌘ 9` instant switch, zero scrollback loss).
+- **Agentless OpenSSH `ControlMaster` Multiplexing**: Reuses macOS OpenSSH (`~/.ssh/config`, `ProxyJump`, `ProxyCommand`, 2FA/SSO/certificates) — no remote daemon installation required.
+- **cmux-Style Resilient Terminal**:
+  - Recursive horizontal/vertical split panes (`⌘ \` / `⌘ ⇧ \`), `xterm.js` WebGL rendering, OSC 9/99/777 attention badges.
+  - **Seamless Disconnect & Reconnect**: Preserves 100% of local xterm scrollback across disconnects, auto-reconnects with exponential backoff and macOS wake-from-sleep (`powerMonitor`), and automatically attaches per-pane hidden-statusbar `tmux` sessions on remote hosts when available.
+- **Sublime Text 3-Inspired Editor**:
+  - Authentic **Monokai**, **Mariana**, and **Boxy Dark** themes, raised seamless tabs, dirty `●` indicator, Minimap, 1/2-column split (`⌥ ⌘ 1` / `⌥ ⌘ 2`), cross-environment file Diff, and classic ST3 shortcuts.
+  - Enhanced non-LSP syntax highlighting for **C/C++/CUDA** and **Python** (functions, namespaces, STL/typing types, `self`/`this`, `@decorators`, `#include`, f-strings, magic dunders, `TODO` tags).
+- **Fast Multi-Environment Search (`⌘ ⇧ F`) & Goto Files (`⌘ P`)**:
+  - Server-side `rg --files -L` (follows symlinks, handles huge monorepos without truncation) + `file:line` jump.
+  - Streaming multi-environment `rg --json` (with `grep -rnI` fallback) and editable `Where:` path bar.
+- **Cross-Environment File Tree & Drag-and-Drop Transfer**:
+  - Drop from Finder onto any folder or workspace to upload.
+  - **Dual Tree / Transfer Mode** to drag files/folders directly between `Local ↔ SSH` or `SSH-A ↔ SSH-B` over streaming SFTP pipes.
+  - Hold **`⌥ (Option) + Drag`** on remote files to drag directly to Finder, or right-click `Download to Mac...`.
 
-在应用内按 **`⌘ ,`**（或点击侧边栏 / 右上角齿轮图标）即可直接在编辑器内打开 `config.json`，修改后按 **`⌘ S`** 保存即可实时热更新工作区列表与主题！
+## Local Workspace Configuration (Not Committed to Git)
 
-```json
-{
-  "theme": "monokai",
-  "showAllSshConfigHosts": false,
-  "workspaces": [
-    {
-      "id": "local",
-      "name": "Local Mac",
-      "kind": "local",
-      "defaultPath": "~/Documents/code",
-      "color": "#66d9ef",
-      "pinned": true
-    },
-    {
-      "id": "ssh:dev92",
-      "name": "dev92",
-      "kind": "ssh",
-      "host": "dev92",
-      "defaultPath": "~/workspace",
-      "color": "#a6e22e",
-      "useTmux": false,
-      "pinned": true
-    },
-    {
-      "id": "ssh:cn_a10",
-      "name": "cn_a10",
-      "kind": "ssh",
-      "host": "cn_a10",
-      "defaultPath": "~",
-      "color": "#fd971f",
-      "useTmux": false,
-      "pinned": true
-    }
-  ]
-}
-```
+MultiplexIDE never stores personal hosts in the repository. On startup, it loads configuration from the first local path found:
 
-## 启动与验证
+1. `MULTIPLEX_CONFIG_PATH` environment variable (if set)
+2. `./multiplex.local.json` in the project directory (**gitignored** — ideal for local development)
+3. `~/.config/multiplex-ide/config.json` (auto-created on first launch with `Local` only)
+
+To configure your own SSH environments locally:
 
 ```bash
-# 开发模式启动
+cp multiplex.config.example.json multiplex.local.json
+```
+
+Or press **`⌘ ,`** inside the app to edit your active config JSON directly in an editor tab — pressing **`⌘ S`** hot-reloads workspaces and theme immediately.
+
+See [multiplex.config.example.json](multiplex.config.example.json) for all supported fields (`theme`, `showAllSshConfigHosts`, `extraPathDirs`, and `workspaces`).
+
+## Development & Packaging (macOS)
+
+```bash
+# Install dependencies (rebuilds node-pty for Electron)
+npm install
+
+# Run in development mode
 npm run dev
 
-# 类型检查 + 单元测试 + 生产构建
+# Typecheck + unit tests + production build
 npm run typecheck && npm test && npm run build
 
-# 打包 macOS .app / .dmg
+# Package macOS .app / .dmg into dist/
 npm run package:mac
 ```
 
-## 常用快捷键
+## Shortcuts
 
-| 快捷键 | 功能 |
+| Shortcut | Action |
 | :--- | :--- |
-| `⌘ ,` | 在编辑器中打开 `config.json` 配置文件（`⌘ S` 保存即热加载） |
-| `⌘ 1` / `⌘ 2` / `⌘ 3` | 秒切工作区（Local Mac / dev92 / cn_a10） |
-| `⌘ P` | Sublime Goto Anything（模糊跳文件，支持 `path:line` 行号跳转与跨环境切换） |
-| `⌘ ⇧ F` | Sublime Find in Files（支持可编辑 `Where` 路径与多环境并发检索） |
-| `⌘ \` / `⌘ ⇧ \` | 终端水平 / 垂直分屏 |
-| `⌥ ⌘ 1` / `⌥ ⌘ 2` | 编辑器单列 / 双列布局 |
-| `⌘ B` / `⌘ J` | 展开/收起左侧边栏 / 底部终端面板 |
-| `⌘ S` / `⌘ W` | 保存当前文件 / 关闭当前标签 |
+| `⌘ ,` | Open active config JSON in editor (`⌘ S` hot-reloads) |
+| `⌘ 1` .. `⌘ 9` | Switch workspace |
+| `⌘ P` | Goto Anything (supports `path:line` & multi-workspace toggle) |
+| `⌘ ⇧ F` | Find in Files across one or multiple environments |
+| `⌘ \` / `⌘ ⇧ \` | Split active terminal horizontally / vertically |
+| `⌥ ⌘ 1` / `⌥ ⌘ 2` | Single / 2-column editor layout |
+| `⌘ B` / `⌘ J` | Toggle sidebar / terminal panel |
+| `⌘ S` / `⌘ W` | Save current file / close current tab |
+| `⌘ D` / `⌘ ⇧ D` / `⌘ L` / `⌘ ⇧ K` | Select next occurrence / duplicate line / select line / delete line |
+
+## License
+
+[MIT](LICENSE)

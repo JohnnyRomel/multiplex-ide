@@ -2,9 +2,13 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { parseSshConfigContent, EnvironmentRegistry, createDefaultConfig } from '../src/main/ssh/configParser'
+import {
+  parseSshConfigContent,
+  EnvironmentRegistry,
+  createDefaultConfig
+} from '../src/main/ssh/configParser'
 import { SshControlMaster } from '../src/main/ssh/controlMaster'
-import { parseOscNotifications } from '../src/main/terminal/terminalManager'
+import { parseOscNotifications, stripEraseScrollback } from '../src/main/terminal/terminalManager'
 import { UnifiedVfs } from '../src/main/fs/vfs'
 import { TransferManager } from '../src/main/fs/transferManager'
 import { SearchManager, parseGrepLine, parseRgJsonLine, scoreQuickOpenCandidate } from '../src/main/search/searchManager'
@@ -24,24 +28,31 @@ afterAll(() => {
 })
 
 describe('Config File & SSH Config Parser', () => {
-  it('seeds default config with only Local Mac, dev92 (~/workspace), and cn_a10 (~)', () => {
+  it('seeds a clean public default config containing only the Local workspace', () => {
     const def = createDefaultConfig()
     expect(def.theme).toBe('monokai')
     expect(def.showAllSshConfigHosts).toBe(false)
-    expect(def.workspaces.map((w) => w.name)).toEqual(['Local Mac', 'dev92', 'cn_a10'])
-    expect(def.workspaces[1]).toMatchObject({ host: 'dev92', defaultPath: '~/workspace' })
-    expect(def.workspaces[2]).toMatchObject({ host: 'cn_a10', defaultPath: '~' })
+    expect(def.workspaces).toHaveLength(1)
+    expect(def.workspaces[0]).toMatchObject({ id: 'local', name: 'Local', kind: 'local', defaultPath: '~' })
   })
 
-  it('persists and hot-reloads config.json edits cleanly', () => {
+  it('persists and hot-reloads local config.json edits cleanly', () => {
     const userData = path.join(tmpRoot, 'userdata')
     const cfgPath = path.join(tmpRoot, 'config.json')
     const reg = new EnvironmentRegistry(userData, cfgPath)
 
     expect(fs.existsSync(cfgPath)).toBe(true)
-    expect(reg.list().map((e) => e.name)).toEqual(['Local Mac', 'dev92', 'cn_a10'])
+    expect(reg.list().map((e) => e.name)).toEqual(['Local'])
 
-    // Edit config.json on disk and verify hot-reload
+    // Add a custom SSH host and edit config.json on disk to verify hot-reload
+    const added = reg.addOrUpdateCustom({
+      name: 'dev-server',
+      host: 'dev-server',
+      defaultPath: '~/workspace',
+      useTmux: true
+    })
+    expect(added.defaultPath).toBe('~/workspace')
+
     const edited = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
     edited.theme = 'mariana'
     edited.workspaces[1].defaultPath = '/data/workspace'
@@ -49,7 +60,7 @@ describe('Config File & SSH Config Parser', () => {
 
     const reloaded = reg.reloadFromDisk()
     expect(reloaded.theme).toBe('mariana')
-    expect(reloaded.environments.find((e) => e.name === 'dev92')?.defaultPath).toBe('/data/workspace')
+    expect(reloaded.environments.find((e) => e.name === 'dev-server')?.defaultPath).toBe('/data/workspace')
   })
 
   it('parses hosts, ProxyJump, Port, wildcards, and Include files from ssh_config', () => {
@@ -58,8 +69,8 @@ describe('Config File & SSH Config Parser', () => {
     fs.writeFileSync(
       path.join(incDir, 'extra.conf'),
       `
-Host dev92
-  HostName 10.20.30.92
+Host dev-server
+  HostName 10.20.30.40
   User devuser
   Port 2222
   ProxyJump bastion
@@ -72,38 +83,43 @@ Include ${incDir}/*.conf
 Host *
   ServerAliveInterval 60
 
-Host cn_a10 extra-unused
+Host gpu-box staging-box
   HostName 192.168.1.10
-  User root
+  User ubuntu
 `
 
     const hosts = parseSshConfigContent(mainConfig, tmpRoot)
     const names = hosts.map((h) => h.alias)
-    expect(names).toContain('dev92')
-    expect(names).toContain('cn_a10')
+    expect(names).toContain('dev-server')
+    expect(names).toContain('gpu-box')
     expect(names).not.toContain('*')
 
-    const dev92 = hosts.find((h) => h.alias === 'dev92')!
-    expect(dev92.hostname).toBe('10.20.30.92')
-    expect(dev92.user).toBe('devuser')
-    expect(dev92.port).toBe(2222)
-    expect(dev92.proxyJump).toBe('bastion')
+    const dev = hosts.find((h) => h.alias === 'dev-server')!
+    expect(dev.hostname).toBe('10.20.30.40')
+    expect(dev.user).toBe('devuser')
+    expect(dev.port).toBe(2222)
+    expect(dev.proxyJump).toBe('bastion')
   })
 })
 
-describe('OSC Terminal Notification Parser', () => {
+describe('OSC Terminal Notification & Scrollback Protection', () => {
   it('extracts OSC 9, OSC 777, and OSC 99 notifications while ignoring ConEmu progress', () => {
     const stream =
       'normal output \x1b]9;Build finished!\x07 middle ' +
       '\x1b]9;4;1;50\x07 ' +
-      '\x1b]777;notify;Claude Code;Needs approval\x1b\\ ' +
+      '\x1b]777;notify;Agent;Needs approval\x1b\\ ' +
       '\x1b]99;i=1:d=0;Tests passed\x07'
 
     const notes = parseOscNotifications(stream)
     expect(notes).toHaveLength(3)
     expect(notes[0].body).toBe('Build finished!')
-    expect(notes[1]).toEqual({ title: 'Claude Code', body: 'Needs approval' })
+    expect(notes[1]).toEqual({ title: 'Agent', body: 'Needs approval' })
     expect(notes[2].body).toBe('Tests passed')
+  })
+
+  it('strips ESC[3J erase-scrollback sequence while keeping normal ANSI output intact', () => {
+    const input = 'before\x1b[3J\x1b[2J\x1b[32mafter\x1b[0m'
+    expect(stripEraseScrollback(input)).toBe('before\x1b[2J\x1b[32mafter\x1b[0m')
   })
 })
 
@@ -131,11 +147,11 @@ describe('Search Parsers & End-to-End Local Search / Goto Files', () => {
   })
 
   it('computes accurate match column in grep fallback parser', () => {
-    const m = parseGrepLine('/repo/a.txt:42:prefix WORLD suffix', 's2', 'ssh:dev92', '/repo', 'world', {
+    const m = parseGrepLine('/repo/a.txt:42:prefix WORLD suffix', 's2', 'ssh:dev-server', '/repo', 'world', {
       isCaseSensitive: false
     })
     expect(m).toMatchObject({
-      envId: 'ssh:dev92',
+      envId: 'ssh:dev-server',
       relativePath: 'a.txt',
       line: 42,
       column: 8,
@@ -166,7 +182,7 @@ describe('Search Parsers & End-to-End Local Search / Goto Files', () => {
     const localEnv: Environment = {
       id: 'local',
       kind: 'local',
-      name: 'Local Mac',
+      name: 'Local',
       defaultPath: searchDir,
       color: '#66d9ef',
       useTmux: false,
@@ -190,15 +206,14 @@ describe('Search Parsers & End-to-End Local Search / Goto Files', () => {
     expect(files.map((f) => f.name).sort()).toEqual(['alpha.ts', 'beta.py'])
   })
 
-  it('finds deep & symlinked C++ files like tiktok_monarch_feature_handler.cpp when querying feature_handler.cpp', async () => {
-    const realRepo = path.join(tmpRoot, 'real_data00_repo')
-    const deepDir = path.join(realRepo, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'monarch')
+  it('finds deep & symlinked C++ files like my_service_feature_handler.cpp when querying feature_handler.cpp', async () => {
+    const realRepo = path.join(tmpRoot, 'real_storage_repo')
+    const deepDir = path.join(realRepo, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'service')
     fs.mkdirSync(deepDir, { recursive: true })
-    fs.writeFileSync(path.join(deepDir, 'tiktok_monarch_feature_handler.cpp'), 'void HandleFeature() {}\n')
-    fs.writeFileSync(path.join(deepDir, 'tiktok_monarch_feature_handler.h'), '#pragma once\n')
+    fs.writeFileSync(path.join(deepDir, 'my_service_feature_handler.cpp'), 'void HandleFeature() {}\n')
+    fs.writeFileSync(path.join(deepDir, 'my_service_feature_handler.h'), '#pragma once\n')
     fs.writeFileSync(path.join(realRepo, 'feature_store_helper.cpp'), 'int x = 1;\n')
 
-    // Simulate dev92 style symlinked ~/workspace -> /data00/...
     const symlinkWorkspace = path.join(tmpRoot, 'symlinked_workspace')
     fs.symlinkSync(realRepo, symlinkWorkspace)
 
@@ -211,7 +226,7 @@ describe('Search Parsers & End-to-End Local Search / Goto Files', () => {
     const localEnv: Environment = {
       id: 'local',
       kind: 'local',
-      name: 'Local Mac',
+      name: 'Local',
       defaultPath: symlinkWorkspace,
       color: '#66d9ef',
       useTmux: false,
@@ -221,25 +236,23 @@ describe('Search Parsers & End-to-End Local Search / Goto Files', () => {
 
     const hits = await sm.searchFiles(localEnv, symlinkWorkspace, 'feature_handler.cpp')
     expect(hits.length).toBeGreaterThanOrEqual(1)
-    expect(hits[0].name).toBe('tiktok_monarch_feature_handler.cpp')
+    expect(hits[0].name).toBe('my_service_feature_handler.cpp')
 
-    // Multi-token query ("monarch handler h")
-    const headerHits = await sm.searchFiles(localEnv, symlinkWorkspace, 'monarch handler .h')
-    expect(headerHits.some((f) => f.name === 'tiktok_monarch_feature_handler.h')).toBe(true)
+    const headerHits = await sm.searchFiles(localEnv, symlinkWorkspace, 'service handler .h')
+    expect(headerHits.some((f) => f.name === 'my_service_feature_handler.h')).toBe(true)
 
-    // Verify ranking prioritizes suffix match over scattered path match
     const s1 = scoreQuickOpenCandidate(
       {
-        envId: 'ssh:dev92',
-        filePath: '/w/tiktok_monarch_feature_handler.cpp',
-        relativePath: 'a/b/tiktok_monarch_feature_handler.cpp',
-        name: 'tiktok_monarch_feature_handler.cpp'
+        envId: 'ssh:dev-server',
+        filePath: '/w/my_service_feature_handler.cpp',
+        relativePath: 'a/b/my_service_feature_handler.cpp',
+        name: 'my_service_feature_handler.cpp'
       },
       'feature_handler.cpp'
     )
     const s2 = scoreQuickOpenCandidate(
       {
-        envId: 'ssh:dev92',
+        envId: 'ssh:dev-server',
         filePath: '/w/feature/my_handler.cpp',
         relativePath: 'feature/my_handler.cpp',
         name: 'my_handler.cpp'
@@ -267,7 +280,7 @@ describe('Unified VFS & TransferManager', () => {
     const localEnv: Environment = {
       id: 'local',
       kind: 'local',
-      name: 'Local Mac',
+      name: 'Local',
       defaultPath: tmpRoot,
       color: '#66d9ef',
       useTmux: false,

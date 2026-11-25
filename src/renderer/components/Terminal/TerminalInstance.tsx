@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { Columns2, Rows2, Search, X } from 'lucide-react'
+import { Columns2, RotateCw, Rows2, Search, WifiOff, X } from 'lucide-react'
 import type { EditorThemeId } from '@shared/types'
 import { useAppStore } from '@renderer/stores/useAppStore'
 
@@ -101,11 +101,14 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
   const setFocusedPane = useAppStore((s) => s.setFocusedPane)
   const splitTerminal = useAppStore((s) => s.splitTerminal)
   const closeTerminal = useAppStore((s) => s.closeTerminal)
+  const reconnectTerminal = useAppStore((s) => s.reconnectTerminal)
+  const termStatus = useAppStore((s) => s.terminalStatuses[terminalId])
   const env = useAppStore((s) => s.environments.find((e) => e.id === envId))
 
   const [showFind, setShowFind] = useState(false)
   const [findText, setFindText] = useState('')
   const isFocused = focusedTerminalId === terminalId
+  const connState = termStatus?.state || (env?.kind === 'local' ? 'connected' : 'connecting')
 
   useEffect(() => {
     const el = containerRef.current
@@ -276,8 +279,15 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
       >
         <div className="flex items-center gap-1.5 min-w-0">
           <span
-            className="h-1.5 w-1.5 rounded-full shrink-0"
-            style={{ backgroundColor: env?.color || 'var(--st-accent)' }}
+            className={`h-1.5 w-1.5 rounded-full shrink-0 ${connState === 'reconnecting' || connState === 'connecting' ? 'st3-attention-pulse' : ''}`}
+            style={{
+              backgroundColor:
+                connState === 'disconnected'
+                  ? 'var(--st-red)'
+                  : connState === 'reconnecting' || connState === 'connecting'
+                    ? 'var(--st-yellow)'
+                    : env?.color || 'var(--st-green)'
+            }}
           />
           <span
             className="truncate font-mono"
@@ -285,9 +295,44 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
           >
             {env?.name || envId} — {title}
           </span>
+          {termStatus?.tmuxSession && (
+            <span
+              className="rounded px-1 text-[9px] font-mono shrink-0"
+              style={{ backgroundColor: 'rgba(255,255,255,0.06)', color: 'var(--st-text-dim)' }}
+              title={`Persistent remote tmux session: ${termStatus.tmuxSession}`}
+            >
+              tmux
+            </span>
+          )}
+          {connState === 'reconnecting' && (
+            <span className="font-mono text-[10px] shrink-0" style={{ color: 'var(--st-yellow)' }}>
+              {termStatus?.message || 'Reconnecting...'}
+            </span>
+          )}
+          {connState === 'disconnected' && (
+            <span className="font-mono text-[10px] shrink-0" style={{ color: 'var(--st-red)' }}>
+              Disconnected
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-0.5">
+          {env?.kind === 'ssh' && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                void reconnectTerminal(terminalId, true)
+                xtermRef.current?.focus()
+              }}
+              title="Reconnect SSH in-place (preserves scrollback & re-attaches tmux)"
+              className="rounded p-0.5 hover:bg-white/10"
+              style={{
+                color: connState === 'disconnected' ? 'var(--st-accent)' : 'var(--st-text-dim)'
+              }}
+            >
+              <RotateCw className={`h-3 w-3 ${connState === 'reconnecting' ? 'animate-spin' : ''}`} />
+            </button>
+          )}
           <button
             onClick={(e) => {
               e.stopPropagation()
@@ -336,6 +381,38 @@ export const TerminalInstance: React.FC<Props> = ({ envId, paneId, terminalId, t
           </button>
         </div>
       </div>
+
+      {/* Non-destructive cmux-style reconnect banner (scrollback stays 100% visible below!) */}
+      {env?.kind === 'ssh' && (connState === 'disconnected' || connState === 'reconnecting') && (
+        <div
+          className="flex items-center justify-between gap-2 px-2.5 py-1 border-b text-[11px]"
+          style={{
+            backgroundColor: connState === 'reconnecting' ? 'rgba(230, 219, 116, 0.1)' : 'rgba(249, 38, 114, 0.12)',
+            borderColor: 'var(--st-border)'
+          }}
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            <WifiOff
+              className="h-3 w-3 shrink-0"
+              style={{ color: connState === 'reconnecting' ? 'var(--st-yellow)' : 'var(--st-red)' }}
+            />
+            <span className="truncate font-mono text-[10.5px]" style={{ color: 'var(--st-text)' }}>
+              {termStatus?.message || (connState === 'reconnecting' ? 'Reconnecting...' : 'SSH Disconnected')}
+            </span>
+          </div>
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              void reconnectTerminal(terminalId, true)
+              xtermRef.current?.focus()
+            }}
+            className="shrink-0 rounded-sm px-2 py-0.5 text-[10.5px] font-medium text-[#111]"
+            style={{ backgroundColor: 'var(--st-accent)' }}
+          >
+            Reconnect Now
+          </button>
+        </div>
+      )}
 
       {showFind && (
         <div

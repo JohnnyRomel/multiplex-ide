@@ -41,7 +41,7 @@ function findRgLocalBinary(): string | null {
 /**
  * Splits a Goto-Anything file query into clean search tokens.
  * Example: "feature_handler.cpp" -> ["feature_handler.cpp"]
- * Example: "monarch handler cpp" -> ["monarch", "handler", "cpp"]
+ * Example: "service handler cpp" -> ["service", "handler", "cpp"]
  */
 export function splitFileQueryTokens(rawQuery: string): string[] {
   return rawQuery
@@ -84,7 +84,7 @@ export function scoreQuickOpenCandidate(file: QuickOpenFile, rawQuery: string): 
   // Tier 1: Exact filename match ("feature_handler.cpp" === "feature_handler.cpp")
   if (nameLower === q) return 10000 - file.relativePath.length * 0.05
 
-  // Tier 2: Filename ends with query ("tiktok_monarch_feature_handler.cpp" ends with "feature_handler.cpp"!)
+  // Tier 2: Filename ends with query ("my_service_feature_handler.cpp" ends with "feature_handler.cpp"!)
   if (nameLower.endsWith(q)) {
     const idx = nameLower.length - q.length
     const boundaryBonus = idx === 0 || '_-.'.includes(nameLower[idx - 1]) ? 400 : 0
@@ -96,20 +96,20 @@ export function scoreQuickOpenCandidate(file: QuickOpenFile, rawQuery: string): 
     return 7800 - file.name.length * 2 - file.relativePath.length * 0.05
   }
 
-  // Tier 4: Filename contains contiguous query ("tiktok_monarch_feature_handler.cpp" includes "monarch_feature")
+  // Tier 4: Filename contains contiguous query ("my_service_feature_handler.cpp" includes "service_feature")
   const nameIdx = nameLower.indexOf(q)
   if (nameIdx >= 0) {
     const boundaryBonus = nameIdx === 0 || '_-.'.includes(nameLower[nameIdx - 1]) ? 300 : 0
     return 7000 + boundaryBonus - nameIdx * 3 - file.name.length * 1.5
   }
 
-  // Tier 5: Full relative path contains contiguous query (e.g. "monarch/tiktok_feature_handler.cpp")
+  // Tier 5: Full relative path contains contiguous query (e.g. "service/my_feature_handler.cpp")
   const relIdx = relLower.indexOf(q)
   if (relIdx >= 0) {
     return 5500 - file.relativePath.length * 0.5
   }
 
-  // Tier 6: Multi-token match where ALL tokens appear in filename ("monarch handler" -> "tiktok_monarch_feature_handler.cpp")
+  // Tier 6: Multi-token match where ALL tokens appear in filename ("service handler" -> "my_service_feature_handler.cpp")
   if (tokens.length > 1 && tokens.every((t) => nameLower.includes(t))) {
     return 4800 - file.name.length * 2
   }
@@ -372,7 +372,7 @@ export class SearchManager {
   }
 
   private buildRgArgs(req: SearchRequest, rootPath: string): string[] {
-    // Include -L (--follow) so symlinked workspaces like ~/workspace -> /data00/... are searched!
+    // Include -L (--follow) so symlinked workspaces (e.g. ~/workspace -> /data/...) are searched!
     const args = [
       '-L',
       '--json',
@@ -600,10 +600,10 @@ export class SearchManager {
 
   /**
    * Server-side query-aware file finder for Sublime `Cmd+P` Goto Anything!
-   * - Follows symlinks (`-L`) so symlinked workspaces on dev92/cn_a10 (`~/workspace -> /data00/...`) work 100%!
-   * - Uses `--no-ignore-vcs` fallback / unfiltered `rg --files -L` + server-side `grep -iF` BEFORE `head`,
+   * - Follows symlinks (`-L`) so symlinked workspaces (`~/workspace -> /data/...`) work 100%!
+   * - Runs `rg --files -L` + server-side `grep -iF` BEFORE `head`,
    *   so even in a 500,000-file C++ monorepo at depth 15, searching `feature_handler.cpp` finds
-   *   `tiktok_monarch_feature_handler.cpp` immediately without premature truncation!
+   *   `my_service_feature_handler.cpp` immediately without premature truncation!
    */
   async searchFiles(
     env: Environment,
@@ -646,7 +646,7 @@ export class SearchManager {
     const findPrunes = DEFAULT_EXCLUDE_DIRS.map((d) => `-name ${shellQuote(d)}`).join(' -o ')
     const filterPipe = buildShellTokenFilterPipeline(tokens, limit)
 
-    // 1. Primary generator: follows symlinks (-L, e.g. ~/workspace -> /data00/...), up to depth 20
+    // 1. Primary generator: follows symlinks (-L, e.g. ~/workspace -> /data/...), up to depth 20
     // 2. Fallback generator (--no-ignore-vcs): catches gitignored / generated / submodule files if primary returns empty!
     // 3. Subsequence fallback: catches compact abbreviations like "tmfh.cpp"
     const subseqRegex = tokens.length > 0 && query.trim().length <= 32 ? buildSubsequenceRegex(query) : ''

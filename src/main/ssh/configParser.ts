@@ -12,12 +12,12 @@ import type {
 } from '@shared/types'
 
 const ENV_PALETTE = [
-  '#a6e22e', // ST3 Monokai green
-  '#66d9ef', // ST3 Monokai cyan
-  '#fd971f', // ST3 Monokai orange
-  '#f92672', // ST3 Monokai pink
-  '#ae81ff', // ST3 Monokai purple
-  '#e6db74'  // ST3 Monokai yellow
+  '#a6e22e',
+  '#66d9ef',
+  '#fd971f',
+  '#f92672',
+  '#ae81ff',
+  '#e6db74'
 ]
 
 export function pickColorForHost(name: string): string {
@@ -160,49 +160,23 @@ export function loadSystemSshConfig(configPath?: string): SshConfigHostSummary[]
   }
 }
 
-function getDefaultLocalPath(): string {
-  const codeDir = path.join(os.homedir(), 'Documents', 'code')
-  try {
-    if (fs.existsSync(codeDir) && fs.statSync(codeDir).isDirectory()) {
-      return codeDir
-    }
-  } catch {
-    // ignore
-  }
-  return os.homedir()
-}
-
+/**
+ * Clean public default config seeded on first run when no local config exists.
+ * Users add their own SSH hosts via the UI (`+`), `⌘,`, `~/.config/multiplex-ide/config.json`,
+ * or a gitignored `multiplex.local.json`.
+ */
 export function createDefaultConfig(): MultiplexConfigFile {
   return {
     theme: 'monokai',
     showAllSshConfigHosts: false,
+    extraPathDirs: [],
     workspaces: [
       {
         id: 'local',
-        name: 'Local Mac',
+        name: 'Local',
         kind: 'local',
-        defaultPath: getDefaultLocalPath(),
-        color: '#66d9ef',
-        pinned: true
-      },
-      {
-        id: 'ssh:dev92',
-        name: 'dev92',
-        kind: 'ssh',
-        host: 'dev92',
-        defaultPath: '~/workspace',
-        color: '#a6e22e',
-        useTmux: false,
-        pinned: true
-      },
-      {
-        id: 'ssh:cn_a10',
-        name: 'cn_a10',
-        kind: 'ssh',
-        host: 'cn_a10',
         defaultPath: '~',
-        color: '#fd971f',
-        useTmux: false,
+        color: '#66d9ef',
         pinned: true
       }
     ]
@@ -216,18 +190,46 @@ export class EnvironmentRegistry {
   private sshConfigMap: Map<string, SshConfigHostSummary> = new Map()
 
   constructor(userDataDir: string, explicitConfigPath?: string) {
-    // Prefer ~/.config/multiplex-ide/config.json if writable, else fallback to userDataDir/config.json
-    const dotConfigPath = explicitConfigPath ?? path.join(os.homedir(), '.config', 'multiplex-ide', 'config.json')
-    this.configPath = this.ensureWritableConfigPath(dotConfigPath, path.join(userDataDir, 'config.json'))
+    this.configPath = this.resolveConfigPath(userDataDir, explicitConfigPath)
     this.loadOrSeedConfig()
     this.refresh()
   }
 
-  private ensureWritableConfigPath(preferred: string, fallback: string): string {
+  /**
+   * Config lookup order (all strictly local, never committed to git):
+   * 1. Explicit path argument / `MULTIPLEX_CONFIG_PATH` env var
+   * 2. Project-local `multiplex.local.json` (gitignored) if present
+   * 3. User-level `~/.config/multiplex-ide/config.json`
+   * 4. Electron `userData/config.json` fallback
+   */
+  private resolveConfigPath(userDataDir: string, explicitConfigPath?: string): string {
+    if (explicitConfigPath) {
+      fs.mkdirSync(path.dirname(explicitConfigPath), { recursive: true })
+      return explicitConfigPath
+    }
+
+    const envOverride = process.env.MULTIPLEX_CONFIG_PATH
+    if (envOverride) {
+      const expanded = expandLocalTilde(envOverride)
+      fs.mkdirSync(path.dirname(expanded), { recursive: true })
+      return expanded
+    }
+
+    const localOverride = path.join(process.cwd(), 'multiplex.local.json')
     try {
-      fs.mkdirSync(path.dirname(preferred), { recursive: true })
-      return preferred
+      if (fs.existsSync(localOverride) && fs.statSync(localOverride).isFile()) {
+        return localOverride
+      }
     } catch {
+      // ignore
+    }
+
+    const dotConfigPath = path.join(os.homedir(), '.config', 'multiplex-ide', 'config.json')
+    try {
+      fs.mkdirSync(path.dirname(dotConfigPath), { recursive: true })
+      return dotConfigPath
+    } catch {
+      const fallback = path.join(userDataDir, 'config.json')
       fs.mkdirSync(path.dirname(fallback), { recursive: true })
       return fallback
     }
@@ -239,6 +241,10 @@ export class EnvironmentRegistry {
 
   getTheme(): EditorThemeId {
     return this.config.theme || 'monokai'
+  }
+
+  getExtraPathDirs(): string[] {
+    return (this.config.extraPathDirs || []).map(expandLocalTilde)
   }
 
   getConfig(): MultiplexConfigFile {
@@ -254,13 +260,13 @@ export class EnvironmentRegistry {
           this.config = {
             theme: parsed.theme || 'monokai',
             showAllSshConfigHosts: Boolean(parsed.showAllSshConfigHosts),
+            extraPathDirs: Array.isArray(parsed.extraPathDirs) ? parsed.extraPathDirs : [],
             workspaces: parsed.workspaces
           }
           return
         }
       }
     } catch {
-      // If malformed or missing, seed clean default below unless file exists with syntax error
       if (fs.existsSync(this.configPath)) {
         return
       }
@@ -291,17 +297,12 @@ export class EnvironmentRegistry {
     return loadSystemSshConfig()
   }
 
-  hasSshConfigAlias(host?: string): boolean {
-    return Boolean(host && this.sshConfigMap.has(host))
-  }
-
   refresh(): Environment[] {
     const prevStatuses = new Map<string, { status: Environment['status']; statusMessage?: string }>()
     for (const [id, env] of this.environments) {
       prevStatuses.set(id, { status: env.status, statusMessage: env.statusMessage })
     }
 
-    // Parse ~/.ssh/config behind the scenes to enrich configured SSH hosts (ProxyJump, HostName, User, Port)
     const sshHosts = loadSystemSshConfig()
     this.sshConfigMap = new Map(sshHosts.map((h) => [h.alias, h]))
 
@@ -310,11 +311,11 @@ export class EnvironmentRegistry {
     for (const ws of this.config.workspaces) {
       if (ws.kind === 'local') {
         const id = ws.id || 'local'
-        const resolvedLocalPath = ws.defaultPath ? expandLocalTilde(ws.defaultPath) : getDefaultLocalPath()
+        const resolvedLocalPath = ws.defaultPath ? expandLocalTilde(ws.defaultPath) : os.homedir()
         next.set(id, {
           id,
           kind: 'local',
-          name: ws.name || 'Local Mac',
+          name: ws.name || 'Local',
           defaultPath: resolvedLocalPath,
           color: ws.color || '#66d9ef',
           useTmux: false,
@@ -327,6 +328,9 @@ export class EnvironmentRegistry {
         const id = ws.id || `ssh:${hostAlias}`
         const fromSshCfg = this.sshConfigMap.get(hostAlias)
         const prev = prevStatuses.get(id)
+        const delegatesToSshConfig =
+          Boolean(fromSshCfg && !ws.hostname) ||
+          (!ws.hostname && !ws.user && !ws.port && !ws.proxyJump && !ws.identityFile)
 
         next.set(id, {
           id,
@@ -340,17 +344,16 @@ export class EnvironmentRegistry {
           identityFile: ws.identityFile || fromSshCfg?.identityFile,
           defaultPath: ws.defaultPath || '~',
           color: ws.color || pickColorForHost(ws.name || hostAlias),
-          useTmux: ws.useTmux ?? false,
+          useTmux: ws.useTmux ?? true,
           tmuxSessionName: ws.tmuxSessionName || 'multiplex',
           pinned: ws.pinned ?? false,
-          source: fromSshCfg && !ws.hostname ? 'ssh-config' : 'config',
+          source: delegatesToSshConfig ? 'ssh-config' : 'config',
           status: prev?.status ?? 'disconnected',
           statusMessage: prev?.statusMessage
         })
       }
     }
 
-    // Only append remaining ~/.ssh/config hosts if user explicitly enabled showAllSshConfigHosts in config.json
     if (this.config.showAllSshConfigHosts) {
       for (const h of sshHosts) {
         const id = `ssh:${h.alias}`
@@ -368,7 +371,7 @@ export class EnvironmentRegistry {
           identityFile: h.identityFile,
           defaultPath: '~',
           color: pickColorForHost(h.alias),
-          useTmux: false,
+          useTmux: true,
           tmuxSessionName: 'multiplex',
           pinned: false,
           source: 'ssh-config',
@@ -383,7 +386,6 @@ export class EnvironmentRegistry {
   }
 
   list(): Environment[] {
-    // Preserve exact order defined in config.json!
     return Array.from(this.environments.values())
   }
 
@@ -392,20 +394,21 @@ export class EnvironmentRegistry {
   }
 
   addOrUpdateCustom(input: CustomHostInput): Environment {
-    const id = input.id || `ssh:${input.host || input.name}`
+    const host = input.host
+    const id = input.id || `ssh:${host || input.name}`
     const entry: WorkspaceConfigEntry = {
       id,
       name: input.name,
       kind: 'ssh',
-      host: input.host,
-      hostname: input.hostname && input.hostname !== input.host ? input.hostname : undefined,
+      host,
+      hostname: input.hostname && input.hostname !== host ? input.hostname : undefined,
       user: input.user || undefined,
       port: input.port && input.port !== 22 ? input.port : undefined,
       proxyJump: input.proxyJump || undefined,
       identityFile: input.identityFile || undefined,
       defaultPath: input.defaultPath || '~',
       color: input.color || pickColorForHost(input.name),
-      useTmux: input.useTmux ?? false,
+      useTmux: input.useTmux ?? true,
       tmuxSessionName: input.tmuxSessionName
     }
 

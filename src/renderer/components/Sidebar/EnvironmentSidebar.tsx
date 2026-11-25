@@ -15,7 +15,7 @@ import { collectTerminalIds, useAppStore } from '@renderer/stores/useAppStore'
 
 /**
  * Clean, Sublime Text 3-style WORKSPACES section.
- * Displays ONLY configured workspaces (by default: Local Mac, dev92 ~/workspace, cn_a10 ~)
+ * Displays ONLY configured workspaces from local config (by default: Local + any hosts you add)
  * and provides 1-click access to edit config.json right inside the editor!
  */
 export const WorkspaceListSection: React.FC = () => {
@@ -59,11 +59,23 @@ export const WorkspaceListSection: React.FC = () => {
     } else {
       setActiveEnv(env.id)
       const res = await window.multiplex.connectEnvironment(env.id)
+      const existingTermIds = collectTerminalIds(useAppStore.getState().terminalTrees[env.id])
       if (res.ok) {
         addToast('success', `Connected to ${env.name}`)
+        // Re-attach any disconnected panes in-place without clearing scrollback!
+        for (const tid of existingTermIds) {
+          const st = useAppStore.getState().terminalStatuses[tid]
+          if (st && (st.state === 'disconnected' || st.state === 'reconnecting')) {
+            void window.multiplex.reconnectTerminal(tid, false)
+          }
+        }
       } else if (res.needsInteractiveAuth) {
         addToast('info', `Login in ${env.name} terminal to establish SSH ControlMaster`)
-        await ensureTerminalForEnv(env.id)
+        if (existingTermIds.length > 0) {
+          void window.multiplex.reconnectTerminal(existingTermIds[0], true)
+        } else {
+          await ensureTerminalForEnv(env.id)
+        }
       } else if (res.error) {
         addToast('error', res.error)
       }

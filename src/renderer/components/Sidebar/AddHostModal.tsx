@@ -131,7 +131,7 @@ export const AddHostModal: React.FC = () => {
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="dev92"
+                placeholder="dev-server"
                 className="w-full rounded border px-2.5 py-1.5 outline-none font-mono text-[11.5px]"
                 style={{ backgroundColor: 'var(--st-input)', borderColor: 'var(--st-border-light)' }}
               />
@@ -144,7 +144,7 @@ export const AddHostModal: React.FC = () => {
                 required
                 value={host}
                 onChange={(e) => setHost(e.target.value)}
-                placeholder="dev92 or 10.0.1.5"
+                placeholder="ssh-alias or 10.0.1.5"
                 className="w-full rounded border px-2.5 py-1.5 outline-none font-mono text-[11.5px]"
                 style={{ backgroundColor: 'var(--st-input)', borderColor: 'var(--st-border-light)' }}
               />

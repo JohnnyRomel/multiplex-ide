@@ -57,7 +57,7 @@ export const TopToolbar: React.FC = () => {
       className="drag-region flex h-[34px] shrink-0 items-center justify-between border-b pl-[78px] pr-2.5"
       style={{ backgroundColor: 'var(--st-titlebar)', borderColor: 'var(--st-border)' }}
     >
-      {/* Left: Quick Workspace Tabs (always visible for instant switching between Local, dev92, cn_a10!) */}
+      {/* Left: Quick Workspace Tabs (always visible for instant switching between workspaces!) */}
       <div className="no-drag flex items-center gap-1">
         {environments.map((env) => {
           const isActive = env.id === activeEnvId

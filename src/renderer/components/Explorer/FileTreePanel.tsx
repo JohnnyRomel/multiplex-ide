@@ -834,7 +834,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
 
 /**
  * Unified Sublime Text 3 Sidebar:
- * WORKSPACES (Local Mac, dev92, cn_a10) + OPEN FILES + FOLDERS (with optional Dual-Tree transfer split).
+ * WORKSPACES + OPEN FILES + FOLDERS (with optional Dual-Tree transfer split).
  */
 export const FileTreePanel: React.FC = () => {
   const activeEnvId = useAppStore((s) => s.activeEnvId)

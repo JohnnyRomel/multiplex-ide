@@ -2,6 +2,7 @@ export type EnvironmentKind = 'local' | 'ssh'
 export type EnvironmentStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 export type EnvironmentSource = 'config' | 'ssh-config' | 'custom'
 export type EditorThemeId = 'monokai' | 'mariana' | 'boxy'
+export type TerminalConnState = 'connected' | 'connecting' | 'reconnecting' | 'disconnected'
 
 export interface WorkspaceConfigEntry {
   id?: string
@@ -23,6 +24,7 @@ export interface WorkspaceConfigEntry {
 export interface MultiplexConfigFile {
   theme?: EditorThemeId
   showAllSshConfigHosts?: boolean
+  extraPathDirs?: string[]
   workspaces: WorkspaceConfigEntry[]
 }
 
@@ -87,6 +89,19 @@ export interface TerminalSessionInfo {
   cols: number
   rows: number
   createdAt: number
+  tmuxSession?: string
+}
+
+export interface TerminalStatusEvent {
+  terminalId: string
+  envId: string
+  state: TerminalConnState
+  exitCode?: number
+  attempt?: number
+  maxAttempts?: number
+  nextRetryMs?: number
+  message?: string
+  tmuxSession?: string
 }
 
 export interface TerminalNotification {

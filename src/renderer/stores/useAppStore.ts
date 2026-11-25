@@ -6,6 +6,7 @@ import type {
   SearchDoneEvent,
   SearchMatch,
   TerminalNotification,
+  TerminalStatusEvent,
   TransferTask
 } from '@shared/types'
 
@@ -204,6 +205,7 @@ interface AppState {
   envNotifications: Record<string, TerminalNotification[]>
 
   terminalTrees: Record<string, TerminalSplitNode | undefined>
+  terminalStatuses: Record<string, TerminalStatusEvent | undefined>
   focusedPaneByEnv: Record<string, string | undefined>
   focusedTerminalId: string | null
   activeFocusArea: 'editor' | 'terminal'
@@ -253,6 +255,8 @@ interface AppState {
   ensureTerminalForEnv: (envId: string, cwd?: string) => Promise<string | null>
   splitTerminal: (envId: string, direction: 'horizontal' | 'vertical', cwd?: string) => Promise<void>
   closeTerminal: (envId: string, terminalId: string) => Promise<void>
+  reconnectTerminal: (terminalId: string, forceReset?: boolean) => Promise<void>
+  setTerminalStatus: (status: TerminalStatusEvent) => void
   handleTerminalExited: (terminalId: string, envId: string) => void
   setFocusedPane: (envId: string, paneId: string, terminalId: string) => void
 
@@ -297,7 +301,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   showQuickOpen: false,
   showAddHostModal: false,
   dualExplorerEnabled: false,
-  secondaryEnvId: 'ssh:dev92',
+  secondaryEnvId: 'local',
   editorColumns: 1,
   editorFocusGroup: 0,
 
@@ -309,6 +313,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   envNotifications: {},
 
   terminalTrees: {},
+  terminalStatuses: {},
   focusedPaneByEnv: {},
   focusedTerminalId: null,
   activeFocusArea: 'editor',
@@ -554,14 +559,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().handleTerminalExited(terminalId, envId)
   },
 
+  reconnectTerminal: async (terminalId, forceReset = true) => {
+    await window.multiplex.reconnectTerminal(terminalId, forceReset)
+  },
+
+  setTerminalStatus: (status) =>
+    set((s) => ({
+      terminalStatuses: { ...s.terminalStatuses, [status.terminalId]: status }
+    })),
+
   handleTerminalExited: (terminalId, envId) =>
     set((s) => {
       const tree = s.terminalTrees[envId]
       if (!tree) return s
       const nextTree = removeSplitLeaf(tree, terminalId)
       const nextLeaf = findFirstLeaf(nextTree)
+      const nextStatuses = { ...s.terminalStatuses }
+      delete nextStatuses[terminalId]
       return {
         terminalTrees: { ...s.terminalTrees, [envId]: nextTree ?? undefined },
+        terminalStatuses: nextStatuses,
         focusedPaneByEnv: { ...s.focusedPaneByEnv, [envId]: nextLeaf?.paneId },
         focusedTerminalId: s.focusedTerminalId === terminalId ? nextLeaf?.terminalId ?? null : s.focusedTerminalId
       }

@@ -5,7 +5,7 @@ import { useAppStore } from '@renderer/stores/useAppStore'
 
 /**
  * Computes highlight character indices preferring contiguous substring matches FIRST
- * (so searching `feature_handler.cpp` in `tiktok_monarch_feature_handler.cpp` highlights
+ * (so searching `feature_handler.cpp` in `my_service_feature_handler.cpp` highlights
  * the exact `[feature_handler.cpp]` suffix rather than scattered early letters!).
  */
 function getHighlightIndices(text: string, rawQuery: string): Set<number> {
@@ -21,7 +21,7 @@ function getHighlightIndices(text: string, rawQuery: string): Set<number> {
     return hit
   }
 
-  // 2. Multi-token contiguous matches ("monarch handler")
+  // 2. Multi-token contiguous matches ("service handler")
   const tokens = q.split(/\s+/).filter(Boolean)
   if (tokens.length > 1 && tokens.every((tok) => lower.includes(tok))) {
     for (const tok of tokens) {
@@ -90,9 +90,9 @@ const HighlightedText: React.FC<{ text: string; query: string }> = ({ text, quer
 }
 
 /**
- * Sublime Text 3 Goto Anything (Cmd+P) with live server-side search across massive monorepos.
- * Searching `feature_handler.cpp` queries `rg --files -L` + server-side filter directly on dev92/cn_a10/local
- * so files like `tiktok_monarch_feature_handler.cpp` at any depth or past 100k+ files are found immediately!
+ * Sublime Text 3 Goto Anything (Cmd+P) with live server-side search across massive repositories.
+ * Searching `feature_handler.cpp` queries `rg --files -L` + server-side filter directly on local/remote hosts
+ * so files like `my_service_feature_handler.cpp` at any depth or past 100k+ files are found immediately!
  */
 export const QuickOpenModal: React.FC = () => {
   const show = useAppStore((s) => s.showQuickOpen)

@@ -15,6 +15,7 @@ import type {
   TerminalCreateOptions,
   TerminalNotification,
   TerminalSessionInfo,
+  TerminalStatusEvent,
   TransferRequest,
   TransferTask
 } from '@shared/types'
@@ -71,6 +72,8 @@ const api = {
     ipcRenderer.send(IPC.TERM_RESIZE, terminalId, cols, rows)
   },
   killTerminal: (terminalId: string): Promise<void> => ipcRenderer.invoke(IPC.TERM_KILL, terminalId),
+  reconnectTerminal: (terminalId: string, forceReset = true): Promise<void> =>
+    ipcRenderer.invoke(IPC.TERM_RECONNECT, terminalId, forceReset),
   onTerminalData: (cb: (terminalId: string, data: string) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, terminalId: string, data: string) => cb(terminalId, data)
     ipcRenderer.on(IPC.TERM_DATA, handler)
@@ -81,6 +84,11 @@ const api = {
       cb(terminalId, envId, exitCode)
     ipcRenderer.on(IPC.TERM_EXIT, handler)
     return () => ipcRenderer.removeListener(IPC.TERM_EXIT, handler)
+  },
+  onTerminalStatus: (cb: (status: TerminalStatusEvent) => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, status: TerminalStatusEvent) => cb(status)
+    ipcRenderer.on(IPC.TERM_STATUS, handler)
+    return () => ipcRenderer.removeListener(IPC.TERM_STATUS, handler)
   },
   onTerminalNotification: (cb: (notification: TerminalNotification) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, n: TerminalNotification) => cb(n)
