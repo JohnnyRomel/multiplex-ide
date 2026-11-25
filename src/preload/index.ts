@@ -8,6 +8,7 @@ import type {
   FileReadResult,
   GitStatusEntry,
   QuickOpenFile,
+  RecoverableTmuxSession,
   SearchDoneEvent,
   SearchMatch,
   SearchRequest,
@@ -122,6 +123,8 @@ const api = {
   pauseTerminalReconnect: (terminalId: string): Promise<void> =>
     ipcRenderer.invoke(IPC.TERM_PAUSE_RECONNECT, terminalId),
   reconnectAllTerminals: (): Promise<void> => ipcRenderer.invoke(IPC.TERM_RECONNECT_ALL),
+  listRecoverableTmuxSessions: (envId: string, maxAgeSec = 3600): Promise<RecoverableTmuxSession[]> =>
+    ipcRenderer.invoke(IPC.TERM_LIST_RECOVERABLE_TMUX, envId, maxAgeSec),
   onTerminalData: (cb: (terminalId: string, data: string) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, terminalId: string, data: string) => cb(terminalId, data)
     ipcRenderer.on(IPC.TERM_DATA, handler)

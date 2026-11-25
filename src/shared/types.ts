@@ -81,6 +81,18 @@ export interface TerminalCreateOptions {
   rows?: number
   title?: string
   useTmux?: boolean
+  tmuxSession?: string
+  attachRecentTmux?: boolean
+  recentMaxAgeSec?: number
+}
+
+export interface RecoverableTmuxSession {
+  name: string
+  ageSec: number
+  lastActivityEpoch: number
+  attached: number
+  command: string
+  cwd?: string
 }
 
 export interface TerminalSessionInfo {

@@ -11,7 +11,9 @@ import {
 import { SshControlMaster } from '../src/main/ssh/controlMaster'
 import {
   buildRemoteTmuxBootstrapCommand,
+  extractMideTmuxMarker,
   parseOscNotifications,
+  parseRecoverableTmuxOutput,
   stripEraseScrollback
 } from '../src/main/terminal/terminalManager'
 import { UnifiedVfs } from '../src/main/fs/vfs'
@@ -402,9 +404,9 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
   it('enables tmux mouse scrolling and OSC 52 clipboard overrides without truncating WheelUpPane bindings', () => {
     const cmd = buildRemoteTmuxBootstrapCommand('mide_1_abcd', '/workspace/demo')
     expect(cmd).toContain("tmux set-option -g mouse on")
-    expect(cmd).toContain("tmux set-option -t 'mide_1_abcd' mouse on")
-    expect(cmd).toContain("tmux set-option -t 'mide_1_abcd' status off")
-    expect(cmd).toContain("tmux set-option -t 'mide_1_abcd' history-limit 50000")
+    expect(cmd).toContain('tmux set-option -t "$MIDE_S" mouse on')
+    expect(cmd).toContain('tmux set-option -t "$MIDE_S" status off')
+    expect(cmd).toContain('tmux set-option -t "$MIDE_S" history-limit 50000')
     expect(cmd).toContain('terminal-overrides')
     expect(cmd).toContain('set-clipboard on')
     expect(cmd).toContain("select-pane '\\;' send-keys -X -N 3 scroll-up")
@@ -421,10 +423,14 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
     if (hasTmux) {
       const sock = `mide_ut_${process.pid}_${Date.now().toString(36)}`
       const setupOnly = cmd
-        .replace(/exec tmux attach-session -t 'mide_1_abcd';/, '')
+        .replace(/exec tmux attach-session -t "\$MIDE_S";/, '')
         .replace(/\btmux /g, `tmux -L ${sock} -f /dev/null `)
       try {
-        execFileSync('/bin/sh', ['-c', setupOnly], { stdio: 'pipe' })
+        const out = execFileSync('/bin/sh', ['-c', setupOnly], { encoding: 'utf8' })
+        const marker = extractMideTmuxMarker(out)
+        expect(marker.sessionName).toBe('mide_1_abcd')
+        expect(marker.cleaned).toBe('')
+
         const mouseOpt = execFileSync('tmux', ['-L', sock, 'show-options', '-t', 'mide_1_abcd', 'mouse'], {
           encoding: 'utf8'
         }).trim()
@@ -446,6 +452,16 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
         const viUpLine = viKeys.split('\n').find((l) => l.includes('WheelUpPane')) || ''
         expect(viUpLine).toContain('select-pane')
         expect(viUpLine).toContain('scroll-up')
+
+        // Now test `attachRecent: true` automatically discovers and reattaches `mide_1_abcd`!
+        const reattachCmd = buildRemoteTmuxBootstrapCommand('mide_9_new', '/workspace/demo', {
+          attachRecent: true,
+          maxAgeSec: 3600
+        })
+          .replace(/exec tmux attach-session -t "\$MIDE_S";/, '')
+          .replace(/\btmux /g, `tmux -L ${sock} -f /dev/null `)
+        const reattachOut = execFileSync('/bin/sh', ['-c', reattachCmd], { encoding: 'utf8' })
+        expect(extractMideTmuxMarker(reattachOut).sessionName).toBe('mide_1_abcd')
       } finally {
         try {
           execFileSync('tmux', ['-L', sock, 'kill-server'], { stdio: 'ignore' })
@@ -454,5 +470,28 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
         }
       }
     }
+  })
+
+  it('filters recoverable tmux sessions to unattached mide_* active within 1 hour and parses OSC 9991 markers', () => {
+    const now = 1795600000
+    const sample = [
+      `__NOW__:${now}`,
+      `mide_old\t${now - 7200}\t0\tagy\t/workspace`,
+      `mide_attached\t${now - 100}\t1\tagy\t/workspace`,
+      `personal_dev\t${now - 60}\t0\tzsh\t/home/user`,
+      `mide_recent_2\t${now - 1200}\t0\tzsh\t/workspace`,
+      `mide_recent_1\t${now - 180}\t0\tagy\t/workspace/app`,
+      `mide_owned\t${now - 50}\t0\tbash\t/workspace`
+    ].join('\n')
+
+    const list = parseRecoverableTmuxOutput(sample, 3600, new Set(['mide_owned']))
+    expect(list.map((s) => s.name)).toEqual(['mide_recent_1', 'mide_recent_2'])
+    expect(list[0].command).toBe('agy')
+    expect(list[0].ageSec).toBe(180)
+    expect(list[1].ageSec).toBe(1200)
+
+    const extracted = extractMideTmuxMarker('before\x1b]9991;mide_recent_1\x07after')
+    expect(extracted.sessionName).toBe('mide_recent_1')
+    expect(extracted.cleaned).toBe('beforeafter')
   })
 })

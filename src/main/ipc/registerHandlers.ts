@@ -174,6 +174,11 @@ export function registerIpcHandlers(services: MainServices): void {
     await terminalManager.handleSystemResume()
   })
 
+  ipcMain.handle(IPC.TERM_LIST_RECOVERABLE_TMUX, async (_e, envId: string, maxAgeSec = 3600) => {
+    const env = requireEnv(envId)
+    return terminalManager.listRecoverableTmuxSessions(env, maxAgeSec)
+  })
+
   // --- Unified VFS ---
   ipcMain.handle(IPC.FS_READ_DIR, async (_e, envId: string, dirPath: string) => {
     const env = requireEnv(envId)

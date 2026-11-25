@@ -3,6 +3,7 @@ import os from 'os'
 import * as pty from 'node-pty'
 import type {
   Environment,
+  RecoverableTmuxSession,
   TerminalCreateOptions,
   TerminalNotification,
   TerminalSessionInfo,
@@ -13,6 +14,7 @@ import { buildEnrichedEnv, type SshControlMaster } from '../ssh/controlMaster'
 
 // Covers >2.5 minutes of server reboot / VPN switch / Wi-Fi roam with progressive backoff
 const RECONNECT_BACKOFF_MS = [1500, 2500, 4000, 6000, 9000, 12000, 15000, 20000, 25000, 30000]
+const DEFAULT_RECENT_TMUX_MAX_AGE_SEC = 3600
 
 interface ManagedTerminal {
   info: TerminalSessionInfo
@@ -21,6 +23,8 @@ interface ManagedTerminal {
   options: TerminalCreateOptions
   oscBuffer: string
   tmuxSession?: string
+  attachRecentPending: boolean
+  awaitingTmuxAttach: boolean
   state: TerminalStatusEvent['state']
   closedByUser: boolean
   reconnectPaused: boolean
@@ -90,26 +94,109 @@ function remoteCdSnippet(targetDir?: string): string {
 }
 
 /**
+ * Extracts and strips our hidden OSC 9991 marker (`\x1b]9991;<sessionName>\x07`) emitted
+ * right before `exec tmux attach-session` so TerminalManager learns the exact re-attached session.
+ */
+export function extractMideTmuxMarker(data: string): { cleaned: string; sessionName?: string } {
+  let sessionName: string | undefined
+  const cleaned = data.replace(/\x1b\]9991;([a-zA-Z0-9_-]+)\x07/g, (_m, name: string) => {
+    sessionName = name
+    return ''
+  })
+  return { cleaned, sessionName }
+}
+
+/**
+ * Parses `NOW` + `tmux list-sessions` tab-separated output into recently active, unattached
+ * MultiplexIDE-managed (`mide_*`) sessions within `maxAgeSec` (default: 1 hour).
+ */
+export function parseRecoverableTmuxOutput(
+  stdout: string,
+  maxAgeSec = DEFAULT_RECENT_TMUX_MAX_AGE_SEC,
+  ownedSessions?: Set<string>
+): RecoverableTmuxSession[] {
+  const lines = stdout.split(/\r?\n/)
+  let remoteNow = Math.floor(Date.now() / 1000)
+  const results: RecoverableTmuxSession[] = []
+
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line) continue
+    if (line.startsWith('__NOW__:')) {
+      const parsed = parseInt(line.slice(8), 10)
+      if (Number.isFinite(parsed) && parsed > 0) remoteNow = parsed
+      continue
+    }
+    const parts = line.split('\t')
+    if (parts.length < 3) continue
+    const name = parts[0]?.trim() || ''
+    const lastActivityEpoch = parseInt(parts[1], 10)
+    const attached = parseInt(parts[2], 10)
+    const command = (parts[3] || '').trim()
+    const cwd = (parts[4] || '').trim() || undefined
+
+    if (!name.startsWith('mide_')) continue
+    if (!Number.isFinite(lastActivityEpoch) || lastActivityEpoch <= 0) continue
+    if (!Number.isFinite(attached) || attached > 0) continue
+    if (ownedSessions?.has(name)) continue
+
+    const ageSec = Math.max(0, remoteNow - lastActivityEpoch)
+    if (ageSec > maxAgeSec) continue
+
+    results.push({
+      name,
+      ageSec,
+      lastActivityEpoch,
+      attached,
+      command,
+      cwd
+    })
+  }
+
+  return results.sort((a, b) => a.ageSec - b.ageSec)
+}
+
+/**
  * Builds the remote POSIX shell bootstrap command for persistent per-pane `tmux` sessions:
+ * - Optionally (`attachRecent: true`) discovers and re-attaches the most recently active unattached
+ *   `mide_*` session within `maxAgeSec` (default 1 hour) so sessions survive full IDE restarts!
  * - Enables `mouse on` so mouse wheel scrolling works natively inside TUI agents (`agy`, vim, htop)
  *   and scrolls tmux history (`copy-mode -e`) instead of xterm translating wheel-up into Up-Arrow!
  * - Injects OSC 52 (`Ms`) terminfo override + `set-clipboard on` so remote selection copies to macOS clipboard.
  * - Hides tmux status bar so each pane looks & feels like a clean native terminal.
  */
-export function buildRemoteTmuxBootstrapCommand(tmuxSession: string, targetDir?: string): string {
-  const s = shellQuote(tmuxSession)
+export function buildRemoteTmuxBootstrapCommand(
+  tmuxSession: string,
+  targetDir?: string,
+  opts?: { attachRecent?: boolean; maxAgeSec?: number; excludeSessions?: string[] }
+): string {
+  const fallbackQuoted = shellQuote(tmuxSession)
   const cdCmd = remoteCdSnippet(targetDir)
+  const maxAge = Math.max(60, Math.floor(opts?.maxAgeSec ?? DEFAULT_RECENT_TMUX_MAX_AGE_SEC))
+  const exclStr = opts?.excludeSessions?.length ? `|${opts.excludeSessions.join('|')}|` : ''
+
+  const findRecentSnippet = opts?.attachRecent
+    ? `MIDE_NOW=$(date +%s); ` +
+      `MIDE_FOUND=$(tmux list-sessions -F '#{session_activity} #{session_attached} #{session_name}' 2>/dev/null | ` +
+      `awk -v now="$MIDE_NOW" -v maxage="${maxAge}" -v excl=${shellQuote(exclStr)} ` +
+      `'$1 ~ /^[0-9]+$/ && $2 == 0 && $3 ~ /^mide_/ && (now - $1) <= maxage && (excl == "" || index(excl, "|" $3 "|") == 0) {print $1, $3}' | ` +
+      `sort -rn | head -n 1 | awk '{print $2}'); ` +
+      `if [ -n "$MIDE_FOUND" ]; then MIDE_S="$MIDE_FOUND"; fi; `
+    : ''
+
   // NOTE: `'\;'` (quoted backslash-semicolon) is critical for tmux CLI `bind-key`:
   // unquoted `\;` passes a bare `;` to tmux, which tmux interprets as its own top-level
   // command separator and truncates the keybinding to just `select-pane`!
   return (
     `if command -v tmux >/dev/null 2>&1; then ` +
-    `if ! tmux has-session -t ${s} 2>/dev/null; then ${cdCmd}tmux new-session -d -s ${s}; fi; ` +
-    `tmux set-option -t ${s} status off >/dev/null 2>&1 || true; ` +
+    `MIDE_S=${fallbackQuoted}; ` +
+    findRecentSnippet +
+    `if ! tmux has-session -t "$MIDE_S" 2>/dev/null; then ${cdCmd}tmux new-session -d -s "$MIDE_S"; fi; ` +
+    `tmux set-option -t "$MIDE_S" status off >/dev/null 2>&1 || true; ` +
     `tmux set-option -g mouse on >/dev/null 2>&1 || true; ` +
-    `tmux set-option -t ${s} mouse on >/dev/null 2>&1 || true; ` +
+    `tmux set-option -t "$MIDE_S" mouse on >/dev/null 2>&1 || true; ` +
     `tmux set-option -sg escape-time 10 >/dev/null 2>&1 || true; ` +
-    `tmux set-option -t ${s} history-limit 50000 >/dev/null 2>&1 || true; ` +
+    `tmux set-option -t "$MIDE_S" history-limit 50000 >/dev/null 2>&1 || true; ` +
     `tmux set-option -as terminal-overrides ',xterm*:Ms=\\E]52;%p1%s;%p2%s\\007' >/dev/null 2>&1 || true; ` +
     `tmux set-option -s set-clipboard on >/dev/null 2>&1 || true; ` +
     `tmux set-option -g set-clipboard on >/dev/null 2>&1 || true; ` +
@@ -117,7 +204,8 @@ export function buildRemoteTmuxBootstrapCommand(tmuxSession: string, targetDir?:
     `tmux bind-key -T copy-mode WheelDownPane select-pane '\\;' send-keys -X -N 3 scroll-down >/dev/null 2>&1 || true; ` +
     `tmux bind-key -T copy-mode-vi WheelUpPane select-pane '\\;' send-keys -X -N 3 scroll-up >/dev/null 2>&1 || true; ` +
     `tmux bind-key -T copy-mode-vi WheelDownPane select-pane '\\;' send-keys -X -N 3 scroll-down >/dev/null 2>&1 || true; ` +
-    `exec tmux attach-session -t ${s}; ` +
+    `printf '\\033]9991;%s\\007' "$MIDE_S"; ` +
+    `exec tmux attach-session -t "$MIDE_S"; ` +
     `else ${cdCmd}exec \${SHELL:-/bin/bash} -l; fi`
   )
 }
@@ -145,7 +233,9 @@ export class TerminalManager {
     const cols = options.cols || 100
     const rows = options.rows || 30
     const useTmux = env.kind === 'ssh' && (options.useTmux ?? env.useTmux)
-    const tmuxSession = useTmux ? `mide_${shortTag}` : undefined
+    const explicitTmux = useTmux && options.tmuxSession ? options.tmuxSession : undefined
+    const tmuxSession = useTmux ? explicitTmux || `mide_${shortTag}` : undefined
+    const attachRecentPending = Boolean(useTmux && !explicitTmux && options.attachRecentTmux)
 
     const info: TerminalSessionInfo = {
       id,
@@ -165,6 +255,8 @@ export class TerminalManager {
       options: { ...options, cols, rows, useTmux },
       oscBuffer: '',
       tmuxSession,
+      attachRecentPending,
+      awaitingTmuxAttach: attachRecentPending,
       state: env.kind === 'local' ? 'connected' : 'connecting',
       closedByUser: false,
       reconnectPaused: false,
@@ -172,13 +264,62 @@ export class TerminalManager {
       reconnectTimer: null,
       sshCheckTimer: null,
       lastSpawnAt: 0,
-      isReattach: false,
+      isReattach: Boolean(explicitTmux),
       spawnGeneration: 0
     }
 
     this.sessions.set(id, managed)
     void this.prepareAndSpawnPty(managed)
     return info
+  }
+
+  private getOwnedTmuxSessions(envId: string, excludeTerminalId?: string): Set<string> {
+    const owned = new Set<string>()
+    for (const [id, sess] of this.sessions) {
+      if (id === excludeTerminalId) continue
+      if (sess.env.id === envId && sess.tmuxSession) {
+        owned.add(sess.tmuxSession)
+      }
+    }
+    return owned
+  }
+
+  /**
+   * Lists unattached MultiplexIDE (`mide_*`) tmux sessions on `env` that were active within `maxAgeSec`
+   * (default: 1 hour) and are not already claimed by any open pane in this app instance.
+   */
+  async listRecoverableTmuxSessions(
+    env: Environment,
+    maxAgeSec = DEFAULT_RECENT_TMUX_MAX_AGE_SEC
+  ): Promise<RecoverableTmuxSession[]> {
+    if (env.kind !== 'ssh' || !env.useTmux) return []
+    const connected = await this.controlMaster.isConnected(env)
+    if (!connected) return []
+
+    // If an initial pane is currently attaching via `attachRecentPending`, wait briefly for its
+    // OSC 9991 confirmation so we never double-attach the exact same session in a second tab!
+    const deadline = Date.now() + 1500
+    while (Date.now() < deadline) {
+      const anyAwaiting = Array.from(this.sessions.values()).some(
+        (s) => s.env.id === env.id && s.awaitingTmuxAttach && !s.closedByUser
+      )
+      if (!anyAwaiting) break
+      await new Promise((r) => setTimeout(r, 120))
+    }
+
+    const probeCmd =
+      `if command -v tmux >/dev/null 2>&1; then ` +
+      `printf '__NOW__:%s\\n' "$(date +%s)"; ` +
+      `tmux list-sessions -F '#{session_name}\t#{session_activity}\t#{session_attached}\t#{pane_current_command}\t#{pane_current_path}' 2>/dev/null || true; ` +
+      `fi`
+
+    try {
+      const res = await this.controlMaster.exec(env, probeCmd, { timeoutMs: 4000 })
+      const owned = this.getOwnedTmuxSessions(env.id)
+      return parseRecoverableTmuxOutput(res.stdout, maxAgeSec, owned).slice(0, 6)
+    } catch {
+      return []
+    }
   }
 
   private emitStatus(managed: ManagedTerminal, extra?: Partial<TerminalStatusEvent>): void {
@@ -249,7 +390,13 @@ export class TerminalManager {
       const cdCmd = remoteCdSnippet(targetDir)
 
       if (managed.tmuxSession) {
-        const remoteCmd = buildRemoteTmuxBootstrapCommand(managed.tmuxSession, targetDir)
+        const shouldAttachRecent = managed.attachRecentPending && !managed.isReattach
+        const owned = Array.from(this.getOwnedTmuxSessions(env.id, managed.info.id))
+        const remoteCmd = buildRemoteTmuxBootstrapCommand(managed.tmuxSession, targetDir, {
+          attachRecent: shouldAttachRecent,
+          maxAgeSec: managed.options.recentMaxAgeSec ?? DEFAULT_RECENT_TMUX_MAX_AGE_SEC,
+          excludeSessions: owned
+        })
         args = [...baseArgs, '-t', dest, remoteCmd]
       } else if (cdCmd) {
         const remoteCmd = `${cdCmd}exec \${SHELL:-/bin/bash} -l`
@@ -334,8 +481,29 @@ export class TerminalManager {
     ptyProcess.onData((rawData) => {
       if (managed.ptyProcess !== ptyProcess) return
       // Strip ESC[3J on SSH sessions so tmux re-attach never wipes local scrollback
-      const data = env.kind === 'ssh' ? stripEraseScrollback(rawData) : rawData
-      this.events.onData(managed.info.id, data)
+      let data = env.kind === 'ssh' ? stripEraseScrollback(rawData) : rawData
+
+      // Parse hidden OSC 9991 marker emitted right before `exec tmux attach-session`
+      // so we record the exact remote tmux session name (crucial when auto-reattaching a <1h session!)
+      if (env.kind === 'ssh' && data.includes('\x1b]9991;')) {
+        const { cleaned, sessionName } = extractMideTmuxMarker(data)
+        data = cleaned
+        if (sessionName) {
+          const wasAutoRecovered = managed.attachRecentPending && sessionName !== managed.tmuxSession
+          managed.tmuxSession = sessionName
+          managed.info.tmuxSession = sessionName
+          managed.attachRecentPending = false
+          managed.awaitingTmuxAttach = false
+          this.emitStatus(
+            managed,
+            wasAutoRecovered ? { message: `Reattached active tmux session (${sessionName}) on ${env.name}` } : undefined
+          )
+        }
+      }
+
+      if (data) {
+        this.events.onData(managed.info.id, data)
+      }
 
       if (env.kind === 'ssh') {
         if (managed.state !== 'connected' && Date.now() - managed.lastSpawnAt > 400) {

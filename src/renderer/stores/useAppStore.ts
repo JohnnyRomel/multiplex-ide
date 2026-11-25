@@ -241,6 +241,7 @@ interface AppState {
   terminalTabsByEnv: Record<string, TerminalTab[]>
   activeTerminalTabByEnv: Record<string, string | undefined>
   terminalStatuses: Record<string, TerminalStatusEvent | undefined>
+  restoredTmuxEnvs: Record<string, boolean>
   focusedTerminalId: string | null
   activeFocusArea: 'editor' | 'terminal'
 
@@ -290,7 +291,11 @@ interface AppState {
   clearEnvNotifications: (envId: string) => void
 
   ensureTerminalForEnv: (envId: string, cwd?: string) => Promise<string | null>
-  createTerminalTab: (envId: string, opts?: { cwd?: string; title?: string }) => Promise<string | null>
+  restoreAdditionalTmuxTabs: (envId: string) => Promise<void>
+  createTerminalTab: (
+    envId: string,
+    opts?: { cwd?: string; title?: string; tmuxSession?: string; attachRecentTmux?: boolean; focusTab?: boolean }
+  ) => Promise<string | null>
   setActiveTerminalTab: (envId: string, tabId: string) => void
   cycleTerminalTab: (envId: string, delta: 1 | -1) => void
   renameTerminalTab: (envId: string, tabId: string, title: string) => void
@@ -337,6 +342,7 @@ interface AppState {
 
 const storedEditorFont = Number(localStorage.getItem('multiplex-editor-font'))
 const storedTermFont = Number(localStorage.getItem('multiplex-terminal-font'))
+const restoringTmuxEnvsInFlight = new Set<string>()
 
 export const useAppStore = create<AppState>((set, get) => ({
   theme: (localStorage.getItem('multiplex-theme') as EditorThemeId) || 'monokai',
@@ -365,6 +371,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   terminalTabsByEnv: {},
   activeTerminalTabByEnv: {},
   terminalStatuses: {},
+  restoredTmuxEnvs: {},
   focusedTerminalId: null,
   activeFocusArea: 'editor',
 
@@ -587,7 +594,82 @@ export const useAppStore = create<AppState>((set, get) => ({
       const first = findFirstLeaf(tab.root)
       return first?.terminalId ?? null
     }
+
+    const env = get().environments.find((e) => e.id === envId)
+    if (env?.kind === 'ssh' && env.useTmux && !get().restoredTmuxEnvs[envId]) {
+      // If SSH ControlMaster is already connected, discover and restore all active (<1h) tmux sessions as tabs!
+      if (env.status === 'connected' && !restoringTmuxEnvsInFlight.has(envId)) {
+        restoringTmuxEnvsInFlight.add(envId)
+        try {
+          const recovered = await window.multiplex.listRecoverableTmuxSessions(envId, 3600).catch(() => [])
+          set((s) => ({ restoredTmuxEnvs: { ...s.restoredTmuxEnvs, [envId]: true } }))
+          if (recovered.length > 0) {
+            let firstTermId: string | null = null
+            for (let i = 0; i < recovered.length; i++) {
+              const sess = recovered[i]
+              const isCustomCmd = sess.command && !['bash', 'zsh', 'sh', 'fish', '-bash', '-zsh'].includes(sess.command)
+              const tabTitle = isCustomCmd ? `${env.name} · ${sess.command}` : `${env.name} #${i + 1}`
+              const tid = await get().createTerminalTab(envId, {
+                cwd: sess.cwd || cwd,
+                title: tabTitle,
+                tmuxSession: sess.name,
+                focusTab: i === 0
+              })
+              if (i === 0) firstTermId = tid
+            }
+            get().addToast('info', `Restored ${recovered.length} active tmux session(s) on ${env.name}`)
+            return firstTermId
+          }
+        } finally {
+          restoringTmuxEnvsInFlight.delete(envId)
+        }
+      }
+
+      // Cold launch / not connected yet: atomically attach the most recently active (<1h) tmux session in Tab #1,
+      // then `restoreAdditionalTmuxTabs` will restore any remaining active (<1h) sessions once SSH connects!
+      return get().createTerminalTab(envId, { cwd, attachRecentTmux: true })
+    }
+
     return get().createTerminalTab(envId, { cwd })
+  },
+
+  restoreAdditionalTmuxTabs: async (envId) => {
+    const s = get()
+    if (s.restoredTmuxEnvs[envId] || restoringTmuxEnvsInFlight.has(envId)) return
+    const env = s.environments.find((e) => e.id === envId)
+    if (!env || env.kind !== 'ssh' || !env.useTmux || env.status !== 'connected') return
+
+    // Only restore for workspaces the user has opened (active or already has at least 1 tab)
+    const existingTabs = s.terminalTabsByEnv[envId] || []
+    if (existingTabs.length === 0 && s.activeEnvId !== envId) return
+
+    restoringTmuxEnvsInFlight.add(envId)
+    set((st) => ({ restoredTmuxEnvs: { ...st.restoredTmuxEnvs, [envId]: true } }))
+
+    try {
+      const recovered = await window.multiplex.listRecoverableTmuxSessions(envId, 3600).catch(() => [])
+      if (recovered.length === 0) return
+
+      const hadTabs = (get().terminalTabsByEnv[envId] || []).length > 0
+      for (let i = 0; i < recovered.length; i++) {
+        const sess = recovered[i]
+        const isCustomCmd = sess.command && !['bash', 'zsh', 'sh', 'fish', '-bash', '-zsh'].includes(sess.command)
+        const baseNum = (get().terminalTabsByEnv[envId] || []).length + 1
+        const tabTitle = isCustomCmd ? `${env.name} · ${sess.command}` : `${env.name} #${baseNum}`
+        await get().createTerminalTab(envId, {
+          cwd: sess.cwd,
+          title: tabTitle,
+          tmuxSession: sess.name,
+          focusTab: !hadTabs && i === 0
+        })
+      }
+      get().addToast(
+        'info',
+        `Restored ${recovered.length} ${hadTabs ? 'additional ' : ''}active tmux session(s) on ${env.name}`
+      )
+    } finally {
+      restoringTmuxEnvsInFlight.delete(envId)
+    }
   },
 
   createTerminalTab: async (envId, opts) => {
@@ -597,13 +679,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     const existingTabs = get().terminalTabsByEnv[envId] || []
     const nextNum = existingTabs.length + 1
     const defaultTitle = opts?.title || `${env.kind === 'local' ? 'zsh' : env.name} #${nextNum}`
+    const shouldFocus = opts?.focusTab !== false
 
     try {
       const info = await window.multiplex.createTerminal({
         envId,
         cwd: opts?.cwd || get().envRootPaths[envId] || env.defaultPath,
         title: defaultTitle,
-        useTmux: env.useTmux
+        useTmux: env.useTmux,
+        tmuxSession: opts?.tmuxSession,
+        attachRecentTmux: opts?.attachRecentTmux,
+        recentMaxAgeSec: 3600
       })
       const paneId = makeId('pane')
       const tabId = makeId('ttab')
@@ -621,19 +707,23 @@ export const useAppStore = create<AppState>((set, get) => ({
         focusedPaneId: paneId
       }
 
-      set((s) => ({
-        showTerminalPanel: true,
-        terminalTabsByEnv: {
-          ...s.terminalTabsByEnv,
-          [envId]: [...(s.terminalTabsByEnv[envId] || []), newTab]
-        },
-        activeTerminalTabByEnv: {
-          ...s.activeTerminalTabByEnv,
-          [envId]: tabId
-        },
-        focusedTerminalId: s.activeEnvId === envId ? info.id : s.focusedTerminalId,
-        activeFocusArea: s.activeEnvId === envId ? 'terminal' : s.activeFocusArea
-      }))
+      set((s) => {
+        const hasActiveTab = Boolean(s.activeTerminalTabByEnv[envId])
+        const activateThis = shouldFocus || !hasActiveTab
+        return {
+          showTerminalPanel: true,
+          terminalTabsByEnv: {
+            ...s.terminalTabsByEnv,
+            [envId]: [...(s.terminalTabsByEnv[envId] || []), newTab]
+          },
+          activeTerminalTabByEnv: {
+            ...s.activeTerminalTabByEnv,
+            [envId]: activateThis ? tabId : s.activeTerminalTabByEnv[envId]
+          },
+          focusedTerminalId: activateThis && s.activeEnvId === envId ? info.id : s.focusedTerminalId,
+          activeFocusArea: activateThis && s.activeEnvId === envId ? 'terminal' : s.activeFocusArea
+        }
+      })
       return info.id
     } catch (err: any) {
       get().addToast('error', `Failed to open terminal tab: ${err?.message || err}`)

@@ -24,6 +24,7 @@ export const IPC = {
   TERM_RECONNECT: 'term:reconnect',
   TERM_PAUSE_RECONNECT: 'term:pause-reconnect',
   TERM_RECONNECT_ALL: 'term:reconnect-all',
+  TERM_LIST_RECOVERABLE_TMUX: 'term:list-recoverable-tmux',
   TERM_DATA: 'term:data',
   TERM_EXIT: 'term:exit',
   TERM_STATUS: 'term:status',

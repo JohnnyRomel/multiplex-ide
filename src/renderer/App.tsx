@@ -85,9 +85,19 @@ export default function App() {
           }
         }
       ),
-      window.multiplex.onEnvStatusChanged((env) => upsertEnvironment(env)),
+      window.multiplex.onEnvStatusChanged((env) => {
+        upsertEnvironment(env)
+        if (env.kind === 'ssh' && env.status === 'connected' && env.useTmux) {
+          void useAppStore.getState().restoreAdditionalTmuxTabs(env.id)
+        }
+      }),
       window.multiplex.onTerminalExit((terminalId, envId) => handleTerminalExited(terminalId, envId)),
-      window.multiplex.onTerminalStatus((status) => setTerminalStatus(status)),
+      window.multiplex.onTerminalStatus((status) => {
+        setTerminalStatus(status)
+        if (status.message?.startsWith('Reattached active tmux session')) {
+          useAppStore.getState().addToast('info', status.message)
+        }
+      }),
       window.multiplex.onTerminalNotification((n) => pushNotification(n)),
       window.multiplex.onTransferUpdate((task) => upsertTransfer(task)),
       window.multiplex.onSearchMatchBatch((batch) => appendSearchMatches(batch)),

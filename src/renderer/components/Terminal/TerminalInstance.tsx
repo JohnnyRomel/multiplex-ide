@@ -3,7 +3,6 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebLinksAddon } from '@xterm/addon-web-links'
-import { WebglAddon } from '@xterm/addon-webgl'
 import { Columns2, RotateCw, Rows2, Search, WifiOff, X } from 'lucide-react'
 import type { EditorThemeId } from '@shared/types'
 import { useAppStore } from '@renderer/stores/useAppStore'
@@ -142,15 +141,10 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     term.loadAddon(fitAddon)
     term.loadAddon(searchAddon)
     term.loadAddon(webLinksAddon)
+    // Intentionally use xterm.js's built-in DOM renderer (no WebglAddon) on macOS:
+    // avoids ANGLE/Metal WebGL glyph texture atlas corruption (missing/garbled glyphs)
+    // across hidden multi-tab terminals, sleep/wake, and 4K Retina DPR scaling.
     term.open(el)
-
-    try {
-      const webgl = new WebglAddon()
-      webgl.onContextLoss(() => webgl.dispose())
-      term.loadAddon(webgl)
-    } catch {
-      // fallback safely to Canvas/DOM
-    }
 
     xtermRef.current = term
     fitRef.current = fitAddon
