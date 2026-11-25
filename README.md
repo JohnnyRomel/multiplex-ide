@@ -65,6 +65,7 @@ npm run package:mac
 | :--- | :--- |
 | `⌘ ,` | Open active config JSON in editor (`⌘ S` hot-reloads) |
 | `⌘ 1` .. `⌘ 9` | Switch workspace |
+| `⌥ ⌘ ←` / `⌥ ⌘ →` | Switch previous / next editor tab |
 | `⌘ P` | Goto Anything (supports `path:line` & multi-workspace toggle) |
 | `⌘ ⇧ F` | Find in Files across one or multiple environments |
 | `⌘ ⇧ T` (or `⌘ T` in terminal) | Open new terminal tab in active workspace |

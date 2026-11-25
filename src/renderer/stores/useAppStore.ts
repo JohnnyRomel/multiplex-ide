@@ -298,6 +298,8 @@ interface AppState {
   splitTerminal: (envId: string, direction: 'horizontal' | 'vertical', cwd?: string) => Promise<void>
   closeTerminal: (envId: string, terminalId: string) => Promise<void>
   reconnectTerminal: (terminalId: string, forceReset?: boolean) => Promise<void>
+  pauseTerminalReconnect: (terminalId: string) => Promise<void>
+  reconnectAllTerminals: () => Promise<void>
   setTerminalStatus: (status: TerminalStatusEvent) => void
   handleTerminalExited: (terminalId: string, envId: string) => void
   setFocusedPane: (envId: string, tabId: string, paneId: string, terminalId: string) => void
@@ -305,10 +307,11 @@ interface AppState {
   openFile: (envId: string, filePath: string, pos?: { line: number; column: number }, group?: 0 | 1) => Promise<void>
   openDiffTab: (origTabId: string, modTabId: string) => void
   setActiveTab: (tabId: string, group?: 0 | 1) => void
+  cycleEditorTab: (delta: 1 | -1) => void
   updateTabContent: (tabId: string, content: string) => void
   clearPendingPosition: (tabId: string) => void
   saveTab: (tabId: string) => Promise<boolean>
-  closeTab: (tabId: string) => void
+  closeTab: (tabId: string, force?: boolean) => void
 
   setSearchQuery: (q: string) => void
   setSearchEnvIds: (ids: string[]) => void
@@ -761,6 +764,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     await window.multiplex.reconnectTerminal(terminalId, forceReset)
   },
 
+  pauseTerminalReconnect: async (terminalId) => {
+    await window.multiplex.pauseTerminalReconnect(terminalId)
+  },
+
+  reconnectAllTerminals: async () => {
+    await window.multiplex.reconnectAllTerminals()
+  },
+
   setTerminalStatus: (status) =>
     set((s) => ({
       terminalStatuses: { ...s.terminalStatuses, [status.terminalId]: status }
@@ -933,6 +944,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }),
 
+  cycleEditorTab: (delta) => {
+    const s = get()
+    if (s.tabs.length <= 1) return
+    const curId = s.editorFocusGroup === 1 && s.editorColumns === 2 ? s.secondaryTabId : s.activeTabId
+    const idx = Math.max(0, s.tabs.findIndex((t) => t.id === curId))
+    const nextIdx = (idx + delta + s.tabs.length) % s.tabs.length
+    s.setActiveTab(s.tabs[nextIdx].id)
+  },
+
   updateTabContent: (tabId, content) =>
     set((s) => ({
       tabs: s.tabs.map((t) =>
@@ -964,7 +984,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  closeTab: (tabId) =>
+  closeTab: (tabId, force = false) => {
+    const target = get().tabs.find((t) => t.id === tabId)
+    if (!target) return
+    if (target.isDirty && !force) {
+      const discard = window.confirm(`"${target.name}" has unsaved changes. Close without saving?`)
+      if (!discard) return
+    }
     set((s) => {
       const idx = s.tabs.findIndex((t) => t.id === tabId)
       if (idx < 0) return s
@@ -975,7 +1001,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         activeTabId: s.activeTabId === tabId ? fallback : s.activeTabId,
         secondaryTabId: s.secondaryTabId === tabId ? fallback : s.secondaryTabId
       }
-    }),
+    })
+  },
 
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSearchEnvIds: (searchEnvIds) => set({ searchEnvIds }),

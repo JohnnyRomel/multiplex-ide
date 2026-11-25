@@ -111,8 +111,26 @@ export class OpenSshSftpPool {
       sftp.pipe(proc.stdin)
     })
 
+    // Prevent unhandled rejection if background SFTP channel closes while idle
+    entry.ready.catch(() => {})
     this.pool.set(env.id, entry)
     return entry.ready
+  }
+
+  private async withRetry<T>(env: Environment, op: (sftp: any) => Promise<T>): Promise<T> {
+    const hadCached = this.pool.has(env.id)
+    try {
+      const sftp = await this.getSession(env)
+      return await op(sftp)
+    } catch (err: any) {
+      const msg = String(err?.message || err)
+      const isChannelBroken = /closed|eof|reset|broken|disconnected|not connected|timed out/i.test(msg)
+      if (!hadCached && !isChannelBroken) throw err
+      this.dispose(env.id)
+      await this.controlMaster.cleanIfDeadSocket(env).catch(() => {})
+      const freshSftp = await this.getSession(env)
+      return await op(freshSftp)
+    }
   }
 
   dispose(envId: string): void {
@@ -139,33 +157,36 @@ export class OpenSshSftpPool {
   }
 
   async stat(env: Environment, remotePath: string): Promise<SftpStats> {
-    const sftp = await this.getSession(env)
-    return new Promise((resolve, reject) => {
-      sftp.stat(remotePath, (err: Error | null, stats: SftpStats) => {
-        if (err) reject(err)
-        else resolve(stats)
+    return this.withRetry(env, (sftp) =>
+      new Promise((resolve, reject) => {
+        sftp.stat(remotePath, (err: Error | null, stats: SftpStats) => {
+          if (err) reject(err)
+          else resolve(stats)
+        })
       })
-    })
+    )
   }
 
   async lstat(env: Environment, remotePath: string): Promise<SftpStats> {
-    const sftp = await this.getSession(env)
-    return new Promise((resolve, reject) => {
-      sftp.lstat(remotePath, (err: Error | null, stats: SftpStats) => {
-        if (err) reject(err)
-        else resolve(stats)
+    return this.withRetry(env, (sftp) =>
+      new Promise((resolve, reject) => {
+        sftp.lstat(remotePath, (err: Error | null, stats: SftpStats) => {
+          if (err) reject(err)
+          else resolve(stats)
+        })
       })
-    })
+    )
   }
 
   async readdir(env: Environment, remoteDir: string): Promise<FileEntry[]> {
-    const sftp = await this.getSession(env)
-    const rawList: any[] = await new Promise((resolve, reject) => {
-      sftp.readdir(remoteDir, (err: Error | null, list: any[]) => {
-        if (err) reject(err)
-        else resolve(list || [])
+    const rawList: any[] = await this.withRetry(env, (sftp) =>
+      new Promise((resolve, reject) => {
+        sftp.readdir(remoteDir, (err: Error | null, list: any[]) => {
+          if (err) reject(err)
+          else resolve(list || [])
+        })
       })
-    })
+    )
 
     const entries: FileEntry[] = []
     for (const item of rawList) {

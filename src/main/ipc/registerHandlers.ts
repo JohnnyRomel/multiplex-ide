@@ -166,6 +166,14 @@ export function registerIpcHandlers(services: MainServices): void {
     await terminalManager.reconnect(terminalId, { forceReset })
   })
 
+  ipcMain.handle(IPC.TERM_PAUSE_RECONNECT, (_e, terminalId: string) => {
+    terminalManager.pauseReconnect(terminalId)
+  })
+
+  ipcMain.handle(IPC.TERM_RECONNECT_ALL, async () => {
+    await terminalManager.handleSystemResume()
+  })
+
   // --- Unified VFS ---
   ipcMain.handle(IPC.FS_READ_DIR, async (_e, envId: string, dirPath: string) => {
     const env = requireEnv(envId)

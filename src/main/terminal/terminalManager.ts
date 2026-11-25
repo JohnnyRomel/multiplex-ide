@@ -1,3 +1,4 @@
+import fs from 'fs'
 import os from 'os'
 import * as pty from 'node-pty'
 import type {
@@ -7,9 +8,11 @@ import type {
   TerminalSessionInfo,
   TerminalStatusEvent
 } from '@shared/types'
+import { expandLocalTilde } from '../ssh/configParser'
 import { buildEnrichedEnv, type SshControlMaster } from '../ssh/controlMaster'
 
-const RECONNECT_BACKOFF_MS = [1500, 3000, 5000, 8000, 12000, 15000]
+// Covers >2.5 minutes of server reboot / VPN switch / Wi-Fi roam with progressive backoff
+const RECONNECT_BACKOFF_MS = [1500, 2500, 4000, 6000, 9000, 12000, 15000, 20000, 25000, 30000]
 
 interface ManagedTerminal {
   info: TerminalSessionInfo
@@ -20,11 +23,13 @@ interface ManagedTerminal {
   tmuxSession?: string
   state: TerminalStatusEvent['state']
   closedByUser: boolean
+  reconnectPaused: boolean
   reconnectAttempt: number
   reconnectTimer: NodeJS.Timeout | null
   sshCheckTimer: NodeJS.Timeout | null
   lastSpawnAt: number
   isReattach: boolean
+  spawnGeneration: number
 }
 
 export interface TerminalEvents {
@@ -33,6 +38,7 @@ export interface TerminalEvents {
   onStatus: (status: TerminalStatusEvent) => void
   onNotification: (notification: TerminalNotification) => void
   onSshConnected: (envId: string) => void
+  onSshDisconnected?: (envId: string) => void
 }
 
 /**
@@ -128,15 +134,17 @@ export class TerminalManager {
       tmuxSession,
       state: env.kind === 'local' ? 'connected' : 'connecting',
       closedByUser: false,
+      reconnectPaused: false,
       reconnectAttempt: 0,
       reconnectTimer: null,
       sshCheckTimer: null,
       lastSpawnAt: 0,
-      isReattach: false
+      isReattach: false,
+      spawnGeneration: 0
     }
 
     this.sessions.set(id, managed)
-    this.spawnPty(managed)
+    void this.prepareAndSpawnPty(managed)
     return info
   }
 
@@ -148,6 +156,32 @@ export class TerminalManager {
       tmuxSession: managed.tmuxSession,
       ...extra
     })
+  }
+
+  private async prepareAndSpawnPty(managed: ManagedTerminal): Promise<void> {
+    if (managed.closedByUser) return
+    const gen = ++managed.spawnGeneration
+    if (managed.env.kind === 'ssh') {
+      await this.controlMaster.cleanIfDeadSocket(managed.env).catch(() => {})
+    }
+    if (managed.closedByUser || managed.spawnGeneration !== gen) return
+    this.spawnPty(managed)
+  }
+
+  private resolveSafeLocalCwd(rawPath?: string): string {
+    const home = os.homedir()
+    if (!rawPath) return home
+    const expanded = expandLocalTilde(rawPath)
+    if (expanded.startsWith('/')) {
+      try {
+        if (fs.existsSync(expanded) && fs.statSync(expanded).isDirectory()) {
+          return expanded
+        }
+      } catch {
+        // fallback to homedir
+      }
+    }
+    return home
   }
 
   private spawnPty(managed: ManagedTerminal): void {
@@ -170,12 +204,10 @@ export class TerminalManager {
     let cwd = os.homedir()
 
     if (env.kind === 'local') {
-      file = process.env.SHELL || '/bin/zsh'
+      const candidateShell = process.env.SHELL
+      file = candidateShell && fs.existsSync(candidateShell) ? candidateShell : '/bin/zsh'
       args = ['-l']
-      const candidate = options.cwd || env.defaultPath
-      if (candidate && candidate.startsWith('/')) {
-        cwd = candidate
-      }
+      cwd = this.resolveSafeLocalCwd(options.cwd || env.defaultPath)
     } else {
       file = '/usr/bin/ssh'
       const baseArgs = this.controlMaster.buildBaseSshArgs(env, { interactive: true })
@@ -209,22 +241,50 @@ export class TerminalManager {
     this.emitStatus(managed)
 
     const enrichedEnv = buildEnrichedEnv()
-    const ptyProcess = pty.spawn(file, args, {
-      name: 'xterm-256color',
-      cols,
-      rows,
-      cwd,
-      env: {
-        ...enrichedEnv,
-        TERM: 'xterm-256color',
-        COLORTERM: 'truecolor',
-        LANG: process.env.LANG || 'en_US.UTF-8',
-        MULTIPLEX_IDE: '1',
-        MULTIPLEX_ENV_ID: env.id
+    const ptyEnv = {
+      ...enrichedEnv,
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      LANG: process.env.LANG || 'en_US.UTF-8',
+      MULTIPLEX_IDE: '1',
+      MULTIPLEX_ENV_ID: env.id
+    }
+
+    let ptyProcess: pty.IPty
+    try {
+      ptyProcess = pty.spawn(file, args, {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd,
+        env: ptyEnv
+      })
+    } catch (err: any) {
+      if (env.kind === 'local') {
+        ptyProcess = pty.spawn('/bin/zsh', ['-l'], {
+          name: 'xterm-256color',
+          cols,
+          rows,
+          cwd: os.homedir(),
+          env: ptyEnv
+        })
+      } else {
+        managed.state = 'disconnected'
+        this.events.onData(managed.info.id, `\r\n\x1b[31mFailed to spawn SSH PTY: ${err?.message || err}\x1b[0m\r\n`)
+        this.emitStatus(managed, { message: err?.message || 'Failed to spawn SSH' })
+        return
       }
-    })
+    }
 
     managed.ptyProcess = ptyProcess
+    // Apply latest terminal dimensions if UI fitted while prepareAndSpawnPty was awaiting
+    if (managed.info.cols !== cols || managed.info.rows !== rows) {
+      try {
+        ptyProcess.resize(managed.info.cols, managed.info.rows)
+      } catch {
+        // ignore
+      }
+    }
 
     let notifiedSshReady = env.kind === 'local'
     let checking = false
@@ -312,13 +372,20 @@ export class TerminalManager {
       const livedMs = Date.now() - managed.lastSpawnAt
       const cleanUserExit = exitCode === 0 && livedMs > 3000
 
-      if (cleanUserExit) {
+      // Sync environment status if the shared ControlMaster also went down
+      void this.controlMaster.isConnected(env).then((alive) => {
+        if (!alive) {
+          this.events.onSshDisconnected?.(env.id)
+        }
+      })
+
+      if (cleanUserExit || managed.reconnectPaused) {
         managed.state = 'disconnected'
         this.events.onData(
           managed.info.id,
-          `\r\n\x1b[90m─── Session ended (exit 0). Press Enter or click ↻ to reconnect ───\x1b[0m\r\n`
+          `\r\n\x1b[90m─── Session ended (exit ${exitCode ?? 0}). Press Enter or click ↻ to reconnect ───\x1b[0m\r\n`
         )
-        this.emitStatus(managed, { exitCode, message: 'Session ended' })
+        this.emitStatus(managed, { exitCode, message: 'Session ended — press Enter or ↻' })
         return
       }
 
@@ -328,7 +395,7 @@ export class TerminalManager {
   }
 
   private scheduleAutoReconnect(managed: ManagedTerminal, exitCode?: number): void {
-    if (managed.closedByUser) return
+    if (managed.closedByUser || managed.reconnectPaused) return
     const attempt = managed.reconnectAttempt + 1
     const maxAttempts = RECONNECT_BACKOFF_MS.length
 
@@ -336,23 +403,26 @@ export class TerminalManager {
       managed.state = 'disconnected'
       this.events.onData(
         managed.info.id,
-        `\r\n\x1b[31m─── Disconnected from ${managed.env.name}. Press Enter or click ↻ to reconnect ───\x1b[0m\r\n`
+        `\r\n\x1b[31m─── Disconnected from ${managed.env.name}. Press Enter, Space, or click ↻ to reconnect ───\x1b[0m\r\n`
       )
       this.emitStatus(managed, {
         exitCode,
         attempt: maxAttempts,
         maxAttempts,
-        message: 'Auto-reconnect paused — click Reconnect or press Enter'
+        message: 'Auto-reconnect paused — press Enter or click ↻'
       })
       return
     }
 
     managed.reconnectAttempt = attempt
-    const delayMs = RECONNECT_BACKOFF_MS[attempt - 1]
+    const baseDelay = RECONNECT_BACKOFF_MS[attempt - 1]
+    // Add 0..350ms jitter so multiple tabs/splits on the same host don't race each other
+    const jitter = Math.floor(Math.random() * 350)
+    const delayMs = baseDelay + jitter
     managed.state = 'reconnecting'
     this.events.onData(
       managed.info.id,
-      `\r\n\x1b[33m─── Connection lost (code ${exitCode ?? '?'}). Reconnecting to ${managed.env.name} in ${(delayMs / 1000).toFixed(1)}s (${attempt}/${maxAttempts})... ───\x1b[0m\r\n`
+      `\r\n\x1b[33m─── Connection lost (code ${exitCode ?? '?'}). Reconnecting to ${managed.env.name} in ${(baseDelay / 1000).toFixed(1)}s (${attempt}/${maxAttempts})... ───\x1b[0m\r\n`
     )
     this.emitStatus(managed, {
       exitCode,
@@ -364,16 +434,37 @@ export class TerminalManager {
 
     managed.reconnectTimer = setTimeout(async () => {
       managed.reconnectTimer = null
-      if (managed.closedByUser) return
-      // Clean stale control socket if it's dead before re-spawning
-      const alive = await this.controlMaster.isConnected(managed.env)
-      if (!alive) {
-        await this.controlMaster.resetControlSocket(managed.env)
-      }
-      if (managed.closedByUser) return
+      if (managed.closedByUser || managed.reconnectPaused) return
+      // Serialized per-env socket check/reset prevents sibling tabs from tearing down a fresh master
+      await this.controlMaster.cleanIfDeadSocket(managed.env).catch(() => {})
+      if (managed.closedByUser || managed.reconnectPaused) return
       managed.isReattach = true
       this.spawnPty(managed)
     }, delayMs)
+  }
+
+  /**
+   * Pauses automatic reconnect retries on a pane (preserving scrollback) until user manually reconnects.
+   */
+  pauseReconnect(terminalId: string): void {
+    const managed = this.sessions.get(terminalId)
+    if (!managed || managed.closedByUser) return
+    managed.reconnectPaused = true
+    if (managed.reconnectTimer) {
+      clearTimeout(managed.reconnectTimer)
+      managed.reconnectTimer = null
+    }
+    const oldPty = managed.ptyProcess
+    managed.ptyProcess = null
+    if (oldPty) {
+      try {
+        oldPty.kill()
+      } catch {
+        // ignore
+      }
+    }
+    managed.state = 'disconnected'
+    this.emitStatus(managed, { message: 'Reconnect paused — press Enter or ↻' })
   }
 
   /**
@@ -387,6 +478,9 @@ export class TerminalManager {
     if (opts?.env) {
       managed.env = opts.env
     }
+
+    managed.reconnectPaused = false
+    managed.spawnGeneration++
 
     if (managed.reconnectTimer) {
       clearTimeout(managed.reconnectTimer)
@@ -418,34 +512,49 @@ export class TerminalManager {
     )
 
     if (managed.env.kind === 'ssh') {
-      const alive = opts?.forceReset ? false : await this.controlMaster.isConnected(managed.env)
-      if (!alive) {
-        await this.controlMaster.resetControlSocket(managed.env)
+      if (opts?.forceReset) {
+        await this.controlMaster.resetControlSocket(managed.env).catch(() => {})
+      } else {
+        await this.controlMaster.cleanIfDeadSocket(managed.env).catch(() => {})
       }
     }
 
-    if (!managed.closedByUser) {
+    if (!managed.closedByUser && !managed.reconnectPaused) {
       this.spawnPty(managed)
     }
   }
 
   /**
-   * Called on macOS `powerMonitor.on('resume')` (wake from sleep) to proactively recover
-   * any disconnected/reconnecting SSH panes immediately.
+   * Called on macOS `powerMonitor.on('resume')` (wake from sleep) OR network `'online'` event
+   * to recover disconnected/stale SSH panes grouped cleanly per environment without socket races!
    */
   async handleSystemResume(): Promise<void> {
+    const byEnv = new Map<string, ManagedTerminal[]>()
     for (const managed of this.sessions.values()) {
-      if (managed.env.kind !== 'ssh' || managed.closedByUser) continue
-      if (managed.state === 'disconnected' || managed.state === 'reconnecting') {
-        void this.reconnect(managed.info.id, { forceReset: true })
-      } else {
-        // Probe if control socket died during sleep; if dead, reconnect gracefully in-place
-        const alive = await this.controlMaster.isConnected(managed.env)
-        if (!alive) {
-          void this.reconnect(managed.info.id, { forceReset: true })
-        }
-      }
+      if (managed.env.kind !== 'ssh' || managed.closedByUser || managed.reconnectPaused) continue
+      const list = byEnv.get(managed.env.id) || []
+      list.push(managed)
+      byEnv.set(managed.env.id, list)
     }
+
+    await Promise.allSettled(
+      Array.from(byEnv.values()).map(async (panes) => {
+        const env = panes[0].env
+        const alive = await this.controlMaster.isConnected(env)
+        if (!alive) {
+          await this.controlMaster.resetControlSocket(env, { force: true }).catch(() => {})
+        }
+        const targets = alive
+          ? panes.filter((p) => p.state === 'disconnected' || p.state === 'reconnecting')
+          : panes
+        for (let i = 0; i < targets.length; i++) {
+          if (i > 0) {
+            await new Promise((r) => setTimeout(r, 180))
+          }
+          void this.reconnect(targets[i].info.id, { forceReset: false })
+        }
+      })
+    )
   }
 
   /** Marks all SSH panes for an env as disconnected (preserving their panes & scrollback!) */
@@ -483,9 +592,13 @@ export class TerminalManager {
     if (!managed) return
     if (managed.ptyProcess) {
       managed.ptyProcess.write(data)
-    } else if (managed.env.kind === 'ssh' && (data === '\r' || data === '\n')) {
-      // Pressing Enter in a disconnected SSH pane immediately triggers in-place reconnect!
-      void this.reconnect(terminalId, { forceReset: true })
+    } else if (
+      managed.env.kind === 'ssh' &&
+      managed.state !== 'reconnecting' &&
+      (data === '\r' || data === '\n' || data === ' ')
+    ) {
+      // Pressing Enter or Space in a disconnected SSH pane immediately triggers in-place reconnect!
+      void this.reconnect(terminalId, { forceReset: false })
     }
   }
 

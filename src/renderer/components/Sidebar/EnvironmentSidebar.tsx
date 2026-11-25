@@ -2,10 +2,12 @@ import React, { useState } from 'react'
 import {
   ChevronDown,
   ChevronRight,
+  Laptop,
   Layers,
   Plug,
   PlugZap,
   Plus,
+  Server,
   Settings,
   Terminal,
   Trash2
@@ -227,14 +229,19 @@ export const WorkspaceListSection: React.FC = () => {
                   />
                 )}
 
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-1.5 min-w-0">
                   <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${hasAttention ? 'st3-attention-pulse' : ''}`}
+                    className={`h-2 w-2 shrink-0 rounded-full ${hasAttention || env.status === 'connecting' ? 'st3-attention-pulse' : ''}`}
                     style={{ backgroundColor: hasAttention ? 'var(--st-dirty)' : dotColor }}
                   />
+                  {env.kind === 'local' ? (
+                    <Laptop className="h-3.5 w-3.5 shrink-0 opacity-75" style={{ color: env.color }} />
+                  ) : (
+                    <Server className="h-3.5 w-3.5 shrink-0 opacity-80" style={{ color: env.color }} />
+                  )}
                   <span className="truncate font-medium">{env.name}</span>
                   <span
-                    className="truncate font-mono text-[10px]"
+                    className="truncate font-mono text-[10.5px]"
                     style={{ color: 'var(--st-text-dim)' }}
                   >
                     {subPath}

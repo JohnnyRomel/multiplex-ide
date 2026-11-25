@@ -10,6 +10,9 @@ import { TransferManager } from './fs/transferManager'
 import { SearchManager } from './search/searchManager'
 import { registerIpcHandlers } from './ipc/registerHandlers'
 
+// Set application name BEFORE app.whenReady() so macOS Menu Bar & Dock display "MultiplexIDE" immediately
+app.setName('MultiplexIDE')
+
 let mainWindow: BrowserWindow | null = null
 let registry: EnvironmentRegistry
 let controlMaster: SshControlMaster
@@ -91,7 +94,7 @@ function dispatchEditAction(action: 'cut' | 'copy' | 'paste' | 'selectAll'): voi
 function buildMacMenu(): void {
   const template: Electron.MenuItemConstructorOptions[] = [
     {
-      label: app.name,
+      label: 'MultiplexIDE',
       submenu: [
         { role: 'about' },
         { type: 'separator' },
@@ -135,16 +138,20 @@ function buildMacMenu(): void {
 }
 
 app.whenReady().then(() => {
-  app.setName('MultiplexIDE')
+  const iconPath = resolveAppIconPath()
+
+  app.setAboutPanelOptions({
+    applicationName: 'MultiplexIDE',
+    applicationVersion: app.getVersion(),
+    copyright: 'Copyright © 2026 MultiplexIDE Contributors · MIT License',
+    iconPath
+  })
 
   // Apply custom macOS Dock icon immediately (visible in both dev mode and packaged builds)
-  if (process.platform === 'darwin' && app.dock) {
-    const iconPath = resolveAppIconPath()
-    if (iconPath) {
-      const dockIcon = nativeImage.createFromPath(iconPath)
-      if (!dockIcon.isEmpty()) {
-        app.dock.setIcon(dockIcon)
-      }
+  if (process.platform === 'darwin' && app.dock && iconPath) {
+    const dockIcon = nativeImage.createFromPath(iconPath)
+    if (!dockIcon.isEmpty()) {
+      app.dock.setIcon(dockIcon)
     }
   }
 
@@ -178,7 +185,12 @@ app.whenReady().then(() => {
     onExit: (terminalId, envId, exitCode) => sendToRenderer(IPC.TERM_EXIT, terminalId, envId, exitCode),
     onStatus: (status) => sendToRenderer(IPC.TERM_STATUS, status),
     onNotification: (notification) => sendToRenderer(IPC.TERM_NOTIFICATION, notification),
-    onSshConnected: markConnected
+    onSshConnected: markConnected,
+    onSshDisconnected: (envId) => {
+      vfs.disposeEnv(envId)
+      const env = registry.setStatus(envId, 'disconnected', 'SSH connection lost — auto-reconnecting')
+      if (env) sendToRenderer(IPC.ENV_STATUS_CHANGED, env)
+    }
   })
 
   // Automatically recover SSH terminals after macOS wakes from sleep (cmux-style resilience!)

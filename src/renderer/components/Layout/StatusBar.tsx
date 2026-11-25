@@ -45,9 +45,36 @@ export const StatusBar: React.FC = () => {
     >
       <div className="flex items-center gap-3 min-w-0">
         {env && (
-          <span className="font-mono">
-            {env.name} ({env.kind === 'local' ? 'local' : env.status})
-          </span>
+          <button
+            onClick={async () => {
+              if (env.kind === 'ssh' && env.status !== 'connected') {
+                await window.multiplex.connectEnvironment(env.id)
+                await window.multiplex.reconnectAllTerminals()
+              }
+            }}
+            title={
+              env.kind === 'ssh' && env.status !== 'connected'
+                ? `Click to reconnect ${env.name}`
+                : `Active workspace: ${env.name}`
+            }
+            className={`flex items-center gap-1.5 font-mono ${env.kind === 'ssh' && env.status !== 'connected' ? 'hover:underline cursor-pointer' : 'cursor-default'}`}
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${env.status === 'connecting' ? 'st3-attention-pulse' : ''}`}
+              style={{
+                backgroundColor:
+                  env.status === 'connected'
+                    ? 'var(--st-green)'
+                    : env.status === 'connecting'
+                      ? 'var(--st-yellow)'
+                      : env.status === 'error'
+                        ? 'var(--st-red)'
+                        : 'var(--st-text-dim)'
+              }}
+            />
+            <span style={{ color: 'var(--st-text-muted)' }}>{env.name}</span>
+            <span className="opacity-75">({env.kind === 'local' ? 'local' : env.status})</span>
+          </button>
         )}
 
         {branch && (

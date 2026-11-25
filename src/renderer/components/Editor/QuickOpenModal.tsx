@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Globe, Loader2 } from 'lucide-react'
 import type { QuickOpenFile } from '@shared/types'
+import { FileIcon } from '@renderer/components/Common/FileIcon'
 import { useAppStore } from '@renderer/stores/useAppStore'
 
 /**
@@ -358,7 +359,8 @@ export const QuickOpenModal: React.FC = () => {
                     backgroundColor: selected ? 'var(--st-sidebar-active)' : 'transparent'
                   }}
                 >
-                  <div className="flex items-baseline gap-2.5 min-w-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <FileIcon name={item.name} size={15} />
                     <span className="text-[13.5px] font-medium shrink-0" style={{ color: 'var(--st-text)' }}>
                       <HighlightedText text={item.name} query={pathQuery} />
                       {targetLine ? (

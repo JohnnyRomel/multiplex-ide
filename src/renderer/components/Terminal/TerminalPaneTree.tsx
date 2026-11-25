@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { Allotment } from 'allotment'
-import { Columns2, Maximize2, Minimize2, Plus, Rows2, Terminal, X } from 'lucide-react'
-import { collectTerminalIds, type TerminalSplitNode, useAppStore } from '@renderer/stores/useAppStore'
+import { Columns2, Maximize2, Minimize2, Plus, RotateCw, Rows2, Terminal, X } from 'lucide-react'
+import { collectEnvTerminalIds, collectTerminalIds, type TerminalSplitNode, useAppStore } from '@renderer/stores/useAppStore'
 import { TerminalInstance } from './TerminalInstance'
 
 const RecursiveSplit: React.FC<{
@@ -47,6 +47,7 @@ export const TerminalWorkspaceArea: React.FC = () => {
   const renameTerminalTab = useAppStore((s) => s.renameTerminalTab)
   const closeTerminalTab = useAppStore((s) => s.closeTerminalTab)
   const splitTerminal = useAppStore((s) => s.splitTerminal)
+  const reconnectAllTerminals = useAppStore((s) => s.reconnectAllTerminals)
   const setLayoutMode = useAppStore((s) => s.setLayoutMode)
 
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
@@ -55,6 +56,13 @@ export const TerminalWorkspaceArea: React.FC = () => {
   const activeEnv = environments.find((e) => e.id === activeEnvId)
   const activeEnvTabs = terminalTabsByEnv[activeEnvId] || []
   const activeTabId = activeTerminalTabByEnv[activeEnvId] || activeEnvTabs[0]?.id
+  const allEnvTermIds = collectEnvTerminalIds(activeEnvTabs)
+  const hasDisconnectedInEnv =
+    activeEnv?.kind === 'ssh' &&
+    allEnvTermIds.some((tid) => {
+      const st = terminalStatuses[tid]?.state
+      return st === 'disconnected' || st === 'reconnecting'
+    })
 
   const commitRename = (tabId: string) => {
     if (editingTitle.trim()) {
@@ -117,7 +125,9 @@ export const TerminalWorkspaceArea: React.FC = () => {
                   backgroundColor: isSelected ? 'var(--st-terminal)' : 'var(--st-tab-inactive)',
                   color: isSelected ? 'var(--st-text)' : 'var(--st-text-dim)',
                   borderColor: 'var(--st-border)',
-                  borderTop: isSelected ? '1px solid rgba(255,255,255,0.1)' : '1px solid transparent',
+                  borderTop: isSelected
+                    ? `2px solid ${activeEnv?.color || 'var(--st-accent)'}`
+                    : '2px solid transparent',
                   maxWidth: '210px'
                 }}
                 title="Double-click to rename tab · Middle-click to close"
@@ -185,8 +195,19 @@ export const TerminalWorkspaceArea: React.FC = () => {
           </button>
         </div>
 
-        {/* Right: Quick Split & Maximize Controls */}
+        {/* Right: Reconnect All + Quick Split & Maximize Controls */}
         <div className="flex h-full items-center gap-1 pl-2">
+          {hasDisconnectedInEnv && (
+            <button
+              onClick={() => void reconnectAllTerminals()}
+              title="Reconnect all disconnected SSH terminals"
+              className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium hover:brightness-110"
+              style={{ backgroundColor: 'rgba(166, 226, 46, 0.16)', color: 'var(--st-accent)' }}
+            >
+              <RotateCw className="h-3 w-3" />
+              <span>Reconnect All</span>
+            </button>
+          )}
           <button
             onClick={() => void splitTerminal(activeEnvId, 'horizontal')}
             title="Split Active Tab Right (⌘\)"

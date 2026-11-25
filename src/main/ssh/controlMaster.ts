@@ -40,6 +40,8 @@ export function buildEnrichedEnv(): NodeJS.ProcessEnv {
 export class SshControlMaster {
   private ctlDir: string
   private homeCache = new Map<string, string>()
+  private resetLocks = new Map<string, Promise<void>>()
+  private lastResetAt = new Map<string, number>()
 
   constructor(baseDir?: string) {
     // Keep socket path short! macOS Unix domain socket max path length is 104 bytes.
@@ -58,15 +60,16 @@ export class SshControlMaster {
       '-o', `ControlPath=${ctlPath}`,
       '-o', 'ControlMaster=auto',
       '-o', 'ControlPersist=600',
-      '-o', 'ServerAliveInterval=20',
-      '-o', 'ServerAliveCountMax=3',
+      '-o', 'ServerAliveInterval=10',
+      '-o', 'ServerAliveCountMax=2',
       '-o', 'TCPKeepAlive=yes'
     ]
 
     if (opts?.batchMode) {
-      args.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=12')
-    } else if (!opts?.interactive) {
-      args.push('-o', 'ConnectTimeout=15')
+      args.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10')
+    } else {
+      // Bound connect timeout on interactive terminals too so dead Wi-Fi/VPN fails fast instead of hanging 75s
+      args.push('-o', 'ConnectTimeout=12')
     }
 
     if (env.source !== 'ssh-config') {
@@ -113,24 +116,68 @@ export class SshControlMaster {
   /**
    * Tears down a stale or dead ControlMaster socket (critical after macOS sleep/wake or VPN changes
    * so reconnecting terminals don't hang on a half-open dead socket!).
+   * Serialized & deduplicated per environment so multi-tab / multi-split reconnects NEVER kill
+   * a fresh socket just established by a sibling pane!
    */
-  async resetControlSocket(env: Environment): Promise<void> {
+  async resetControlSocket(env: Environment, opts?: { force?: boolean }): Promise<void> {
     if (env.kind === 'local') return
+    const existingLock = this.resetLocks.get(env.id)
+    if (existingLock) {
+      await existingLock
+      return
+    }
+
     const ctlPath = this.getControlPath(env)
     if (!fs.existsSync(ctlPath)) return
 
-    await new Promise<void>((resolve) => {
-      execFile(
-        '/usr/bin/ssh',
-        ['-O', 'exit', '-o', `ControlPath=${ctlPath}`, this.getSshDestination(env)],
-        { timeout: 2500, env: buildEnrichedEnv() },
-        () => resolve()
-      )
-    })
+    if (!opts?.force) {
+      const sinceLast = Date.now() - (this.lastResetAt.get(env.id) || 0)
+      if (sinceLast < 3500) {
+        return
+      }
+      // Double-check if a sibling pane already brought the master back online
+      if (await this.isConnected(env)) {
+        return
+      }
+    }
+
+    const task = (async () => {
+      this.lastResetAt.set(env.id, Date.now())
+      await new Promise<void>((resolve) => {
+        execFile(
+          '/usr/bin/ssh',
+          ['-O', 'exit', '-o', `ControlPath=${ctlPath}`, this.getSshDestination(env)],
+          { timeout: 2000, env: buildEnrichedEnv() },
+          () => resolve()
+        )
+      })
+      try {
+        if (fs.existsSync(ctlPath)) fs.unlinkSync(ctlPath)
+      } catch {
+        // ignore unlink race
+      }
+    })()
+
+    this.resetLocks.set(env.id, task)
     try {
-      if (fs.existsSync(ctlPath)) fs.unlinkSync(ctlPath)
-    } catch {
-      // ignore unlink race
+      await task
+    } finally {
+      if (this.resetLocks.get(env.id) === task) {
+        this.resetLocks.delete(env.id)
+      }
+    }
+  }
+
+  /**
+   * Ensures a leftover dead socket file never blocks interactive `ControlMaster=auto` spawning.
+   */
+  async cleanIfDeadSocket(env: Environment): Promise<void> {
+    if (env.kind === 'local') return
+    const ctlPath = this.getControlPath(env)
+    if (!fs.existsSync(ctlPath)) return
+    const alive = await this.isConnected(env)
+    if (!alive) {
+      await this.resetControlSocket(env)
     }
   }
 
@@ -220,7 +267,7 @@ export class SshControlMaster {
   async disconnect(env: Environment): Promise<void> {
     if (env.kind === 'local') return
     this.homeCache.delete(env.id)
-    await this.resetControlSocket(env)
+    await this.resetControlSocket(env, { force: true })
   }
 
   async exec(

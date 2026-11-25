@@ -351,3 +351,46 @@ describe('OSC 52 Remote Clipboard Decoding', () => {
     expect(decodeOsc52Payload('c;!!!not-base64!!!')).toBeNull()
   })
 })
+
+describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () => {
+  it('enforces bounded ConnectTimeout and fast keepalives on interactive SSH terminals and deduplicates socket resets', async () => {
+    const ctlDir = path.join(tmpRoot, 'ctl-test')
+    const cm = new SshControlMaster(ctlDir)
+    const sshEnv: Environment = {
+      id: 'ssh:test-box',
+      kind: 'ssh',
+      name: 'test-box',
+      host: 'test-box',
+      hostname: '127.0.0.1',
+      port: 2222,
+      defaultPath: '~',
+      color: '#a6e22e',
+      useTmux: true,
+      source: 'config',
+      status: 'disconnected'
+    }
+
+    const interactiveArgs = cm.buildBaseSshArgs(sshEnv, { interactive: true })
+    expect(interactiveArgs).toContain('ServerAliveInterval=10')
+    expect(interactiveArgs).toContain('ServerAliveCountMax=2')
+    expect(interactiveArgs).toContain('ConnectTimeout=12')
+
+    const ctlPath = cm.getControlPath(sshEnv)
+    fs.writeFileSync(ctlPath, 'stale-socket-placeholder')
+    expect(fs.existsSync(ctlPath)).toBe(true)
+
+    // First reset cleans up the stale file
+    await cm.resetControlSocket(sshEnv)
+    expect(fs.existsSync(ctlPath)).toBe(false)
+
+    // Recreate a file simulating a newly established ControlMaster right after reset;
+    // a non-forced reset from a sibling tab within the 3.5s cooldown must NOT delete it!
+    fs.writeFileSync(ctlPath, 'fresh-master-placeholder')
+    await cm.resetControlSocket(sshEnv)
+    expect(fs.existsSync(ctlPath)).toBe(true)
+
+    // Explicit disconnect (force: true) removes it immediately
+    await cm.disconnect(sshEnv)
+    expect(fs.existsSync(ctlPath)).toBe(false)
+  })
+})

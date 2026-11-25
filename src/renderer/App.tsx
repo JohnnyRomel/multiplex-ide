@@ -95,8 +95,15 @@ export default function App() {
       window.multiplex.onClipboardAction((action) => handleClipboardAction(action))
     ]
 
+    // Automatically wake and re-attach SSH terminals when macOS network comes back online!
+    const onNetworkOnline = () => {
+      void useAppStore.getState().reconnectAllTerminals()
+    }
+    window.addEventListener('online', onNetworkOnline)
+
     return () => {
       mounted = false
+      window.removeEventListener('online', onNetworkOnline)
       unsubs.forEach((fn) => fn())
     }
   }, [])
@@ -150,6 +157,16 @@ export default function App() {
         e.preventDefault()
         e.stopPropagation()
         state.setEditorColumns(e.code === 'Digit2' ? 2 : 1)
+        return
+      }
+
+      // Alt+Cmd+Left / Alt+Cmd+Right -> Switch Editor Tab (Sublime / macOS standard)
+      if (e.altKey && !e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        if (state.tabs.length > 1) {
+          e.preventDefault()
+          e.stopPropagation()
+          state.cycleEditorTab(e.key === 'ArrowLeft' ? -1 : 1)
+        }
         return
       }
 

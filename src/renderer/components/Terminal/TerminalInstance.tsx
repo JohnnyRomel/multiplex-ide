@@ -108,6 +108,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
   const splitTerminal = useAppStore((s) => s.splitTerminal)
   const closeTerminal = useAppStore((s) => s.closeTerminal)
   const reconnectTerminal = useAppStore((s) => s.reconnectTerminal)
+  const pauseTerminalReconnect = useAppStore((s) => s.pauseTerminalReconnect)
   const termStatus = useAppStore((s) => s.terminalStatuses[terminalId])
   const env = useAppStore((s) => s.environments.find((e) => e.id === envId))
 
@@ -175,6 +176,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     }
 
     requestAnimationFrame(doFit)
+    const settleFitTimer = setTimeout(doFit, 90)
 
     const onDataDisposable = term.onData((data) => {
       window.multiplex.writeTerminal(terminalId, data)
@@ -246,6 +248,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     })
 
     return () => {
+      clearTimeout(settleFitTimer)
       unregisterTerminalInstance(terminalId, term)
       osc52Disposable.dispose()
       observer.disconnect()
@@ -283,15 +286,20 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
 
   useEffect(() => {
     if (isVisible && fitRef.current && xtermRef.current) {
-      requestAnimationFrame(() => {
+      const syncFitAndFocus = () => {
         try {
           fitRef.current?.fit()
-          window.multiplex.resizeTerminal(terminalId, xtermRef.current!.cols, xtermRef.current!.rows)
-          if (isFocused) xtermRef.current?.focus()
+          if (xtermRef.current) {
+            window.multiplex.resizeTerminal(terminalId, xtermRef.current.cols, xtermRef.current.rows)
+            if (isFocused) xtermRef.current.focus()
+          }
         } catch {
           // ignore
         }
-      })
+      }
+      requestAnimationFrame(syncFitAndFocus)
+      const timer = setTimeout(syncFitAndFocus, 80)
+      return () => clearTimeout(timer)
     }
   }, [isVisible, isFocused, terminalId])
 
@@ -344,7 +352,10 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
         outline: isFocused ? '1px solid rgba(255,255,255,0.08)' : 'none',
         outlineOffset: '-1px'
       }}
-      onMouseDown={() => setFocusedPane(envId, tabId, paneId, terminalId)}
+      onMouseDown={() => {
+        setFocusedPane(envId, tabId, paneId, terminalId)
+        requestAnimationFrame(() => xtermRef.current?.focus())
+      }}
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDropPath}
     >
@@ -476,17 +487,32 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
               {termStatus?.message || (connState === 'reconnecting' ? 'Reconnecting...' : 'SSH Disconnected')}
             </span>
           </div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              void reconnectTerminal(terminalId, true)
-              xtermRef.current?.focus()
-            }}
-            className="shrink-0 rounded-sm px-2.5 py-0.5 text-[11.5px] font-medium text-[#111]"
-            style={{ backgroundColor: 'var(--st-accent)' }}
-          >
-            Reconnect Now
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {connState === 'reconnecting' && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void pauseTerminalReconnect(terminalId)
+                }}
+                className="rounded-sm border px-2 py-0.5 text-[11px] hover:bg-white/10"
+                style={{ borderColor: 'var(--st-border-light)', color: 'var(--st-text-muted)' }}
+                title="Pause automatic reconnect retries"
+              >
+                Pause
+              </button>
+            )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                void reconnectTerminal(terminalId, true)
+                xtermRef.current?.focus()
+              }}
+              className="rounded-sm px-2.5 py-0.5 text-[11.5px] font-medium text-[#111]"
+              style={{ backgroundColor: 'var(--st-accent)' }}
+            >
+              Reconnect Now
+            </button>
+          </div>
         </div>
       )}
 

@@ -119,6 +119,9 @@ const api = {
   killTerminal: (terminalId: string): Promise<void> => ipcRenderer.invoke(IPC.TERM_KILL, terminalId),
   reconnectTerminal: (terminalId: string, forceReset = true): Promise<void> =>
     ipcRenderer.invoke(IPC.TERM_RECONNECT, terminalId, forceReset),
+  pauseTerminalReconnect: (terminalId: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.TERM_PAUSE_RECONNECT, terminalId),
+  reconnectAllTerminals: (): Promise<void> => ipcRenderer.invoke(IPC.TERM_RECONNECT_ALL),
   onTerminalData: (cb: (terminalId: string, data: string) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, terminalId: string, data: string) => cb(terminalId, data)
     ipcRenderer.on(IPC.TERM_DATA, handler)

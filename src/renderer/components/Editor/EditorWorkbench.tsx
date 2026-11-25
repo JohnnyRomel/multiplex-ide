@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import * as monaco from 'monaco-editor'
 import { Allotment } from 'allotment'
-import { GitCompare, Save, X } from 'lucide-react'
+import { FileSearch, GitCompare, Save, Search, Settings, Terminal, X } from 'lucide-react'
+import logoUrl from '@renderer/assets/logo.png'
+import { FileIcon } from '@renderer/components/Common/FileIcon'
 import { type EditorTab, useAppStore } from '@renderer/stores/useAppStore'
 import { registerMonacoEditor, unregisterMonacoEditor } from '@renderer/utils/clipboardBridge'
 import { bindSublimeKeybindings, getMonacoThemeName, initMonacoSublime } from './monacoSetup'
@@ -196,7 +198,12 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
       ed.setModel(model)
     }
 
-    setCursorInfo({ language: tab.language })
+    const curPos = ed.getPosition()
+    setCursorInfo({
+      line: curPos?.lineNumber ?? 1,
+      column: curPos?.column ?? 1,
+      language: tab.language
+    })
 
     if (tab.pendingPosition) {
       const { line, column } = tab.pendingPosition
@@ -243,23 +250,83 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
 
       {!tab && (
         <div
-          className="flex h-full w-full flex-col items-center justify-center gap-4 select-none"
+          className="flex h-full w-full flex-col items-center justify-center gap-5 px-6 select-none"
           style={{ color: 'var(--st-text-dim)' }}
         >
-          <div className="text-[22px] font-light tracking-wider opacity-40">Sublime Multiplex</div>
-          <div className="grid grid-cols-2 gap-x-8 gap-y-1.5 text-[12.5px] font-mono opacity-65">
-            <span>Goto Files</span>
-            <span>⌘ P</span>
-            <span>Find in Files</span>
-            <span>⌘ ⇧ F</span>
-            <span>Edit Config JSON</span>
-            <span>⌘ ,</span>
+          <div className="flex flex-col items-center gap-2.5">
+            <img
+              src={logoUrl}
+              alt="MultiplexIDE"
+              className="h-[72px] w-[72px] rounded-[16px] shadow-2xl"
+              draggable={false}
+            />
+            <div className="text-[22px] font-semibold tracking-tight" style={{ color: 'var(--st-text)' }}>
+              MultiplexIDE
+            </div>
+            <div className="text-[12.5px]" style={{ color: 'var(--st-text-muted)' }}>
+              Multi-Environment Code Editor · Resilient Split Terminal · Fast SFTP
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2.5 w-full max-w-[440px]">
+            <button
+              onClick={() => useAppStore.getState().setShowQuickOpen(true)}
+              className="flex items-center justify-between rounded border px-3 py-2 text-[12.5px] transition-colors hover:bg-white/5"
+              style={{ borderColor: 'var(--st-border-light)', backgroundColor: 'var(--st-panel)', color: 'var(--st-text)' }}
+            >
+              <span className="flex items-center gap-2">
+                <FileSearch className="h-4 w-4" style={{ color: 'var(--st-accent-blue)' }} />
+                Goto Files
+              </span>
+              <kbd className="font-mono text-[11px] opacity-60">⌘P</kbd>
+            </button>
+
+            <button
+              onClick={() => useAppStore.getState().setShowSearchPanel(true)}
+              className="flex items-center justify-between rounded border px-3 py-2 text-[12.5px] transition-colors hover:bg-white/5"
+              style={{ borderColor: 'var(--st-border-light)', backgroundColor: 'var(--st-panel)', color: 'var(--st-text)' }}
+            >
+              <span className="flex items-center gap-2">
+                <Search className="h-4 w-4" style={{ color: 'var(--st-accent)' }} />
+                Find in Files
+              </span>
+              <kbd className="font-mono text-[11px] opacity-60">⌘⇧F</kbd>
+            </button>
+
+            <button
+              onClick={() => void useAppStore.getState().createTerminalTab(useAppStore.getState().activeEnvId)}
+              className="flex items-center justify-between rounded border px-3 py-2 text-[12.5px] transition-colors hover:bg-white/5"
+              style={{ borderColor: 'var(--st-border-light)', backgroundColor: 'var(--st-panel)', color: 'var(--st-text)' }}
+            >
+              <span className="flex items-center gap-2">
+                <Terminal className="h-4 w-4" style={{ color: 'var(--st-dirty)' }} />
+                New Terminal Tab
+              </span>
+              <kbd className="font-mono text-[11px] opacity-60">⌘⇧T</kbd>
+            </button>
+
+            <button
+              onClick={() => void useAppStore.getState().openConfigFile()}
+              className="flex items-center justify-between rounded border px-3 py-2 text-[12.5px] transition-colors hover:bg-white/5"
+              style={{ borderColor: 'var(--st-border-light)', backgroundColor: 'var(--st-panel)', color: 'var(--st-text)' }}
+            >
+              <span className="flex items-center gap-2">
+                <Settings className="h-4 w-4" style={{ color: 'var(--st-purple)' }} />
+                Edit Config
+              </span>
+              <kbd className="font-mono text-[11px] opacity-60">⌘,</kbd>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-x-8 gap-y-1 text-[12px] font-mono opacity-65 pt-1">
             <span>Switch Workspace</span>
-            <span>⌘ 1 / ⌘ 2 / ⌘ 3</span>
-            <span>New Terminal Tab</span>
-            <span>⌘ ⇧ T</span>
+            <span>⌘ 1 .. ⌘ 9</span>
+            <span>Switch Editor Tab</span>
+            <span>⌥ ⌘ ← / →</span>
+            <span>Switch Terminal Tab</span>
+            <span>⌘ ⇧ [ / ]</span>
             <span>Split Terminal</span>
-            <span>⌘ \</span>
+            <span>⌘ \ / ⌘ ⇧ \</span>
             <span>Font Size</span>
             <span>⌘ + / ⌘ - / ⌘ 0</span>
           </div>
@@ -307,6 +374,13 @@ export const EditorWorkbench: React.FC = () => {
 
   const [showDiffPicker, setShowDiffPicker] = useState(false)
 
+  useEffect(() => {
+    if (!showDiffPicker) return
+    const close = () => setShowDiffPicker(false)
+    window.addEventListener('click', close)
+    return () => window.removeEventListener('click', close)
+  }, [showDiffPicker])
+
   const primaryTab = tabs.find((t) => t.id === activeTabId) || null
   const secondaryTab = tabs.find((t) => t.id === secondaryTabId) || null
   const focusedTab = editorFocusGroup === 1 && editorColumns === 2 ? secondaryTab : primaryTab
@@ -333,9 +407,14 @@ export const EditorWorkbench: React.FC = () => {
                 onAuxClick={(e) => {
                   if (e.button === 1) closeTab(tab.id)
                 }}
-                className={`st3-tab group shrink-0 max-w-[250px] ${isActive ? 'st3-tab-active' : ''}`}
+                className={`st3-tab group shrink-0 max-w-[260px] gap-1.5 ${isActive ? 'st3-tab-active' : ''}`}
                 title={`${env?.name || tab.envId}:${tab.path}`}
               >
+                {tab.isDiff ? (
+                  <GitCompare className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--st-accent-blue)' }} />
+                ) : (
+                  <FileIcon name={tab.name} size={14} />
+                )}
                 <span className="truncate">{tab.name}</span>
 
                 {env && env.kind === 'ssh' && (
@@ -384,7 +463,10 @@ export const EditorWorkbench: React.FC = () => {
 
           {tabs.filter((t) => !t.isDiff).length >= 2 && (
             <button
-              onClick={() => setShowDiffPicker((v) => !v)}
+              onClick={(e) => {
+                e.stopPropagation()
+                setShowDiffPicker((v) => !v)
+              }}
               title="Diff active file with another open tab"
               className="flex items-center gap-1 rounded p-1 hover:bg-white/10"
               style={{ color: 'var(--st-text-dim)' }}
@@ -395,6 +477,7 @@ export const EditorWorkbench: React.FC = () => {
 
           {showDiffPicker && focusedTab && (
             <div
+              onClick={(e) => e.stopPropagation()}
               className="absolute right-0 top-[36px] z-40 w-[270px] rounded border py-1 shadow-2xl text-[12px]"
               style={{ backgroundColor: 'var(--st-panel)', borderColor: 'var(--st-border-light)' }}
             >

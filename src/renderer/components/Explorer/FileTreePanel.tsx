@@ -4,13 +4,13 @@ import {
   ArrowUp,
   ChevronDown,
   ChevronRight,
+  ChevronsDownUp,
   Download,
   Eye,
   EyeOff,
   File,
   FileCode,
   FilePlus,
-  Folder,
   FolderOpen,
   FolderPlus,
   RefreshCw,
@@ -19,6 +19,7 @@ import {
   X
 } from 'lucide-react'
 import type { Environment, FileEntry } from '@shared/types'
+import { FileIcon, FolderIcon } from '@renderer/components/Common/FileIcon'
 import { useAppStore } from '@renderer/stores/useAppStore'
 import { WorkspaceListSection } from '../Sidebar/EnvironmentSidebar'
 
@@ -41,15 +42,10 @@ interface TreeNodeProps {
   onDropOnDir: (e: React.DragEvent, targetDir: string) => void
 }
 
-function getFileIconColor(name: string): string {
-  const ext = name.split('.').pop()?.toLowerCase() ?? ''
-  if (['ts', 'tsx'].includes(ext)) return '#66d9ef'
-  if (['js', 'jsx', 'mjs'].includes(ext)) return '#e6db74'
-  if (['py'].includes(ext)) return '#a6e22e'
-  if (['go'].includes(ext)) return '#5fb3b3'
-  if (['rs', 'c', 'cpp', 'h'].includes(ext)) return '#fd971f'
-  if (['json', 'yaml', 'yml', 'toml'].includes(ext)) return '#ae81ff'
-  return 'var(--st-text-dim)'
+function formatEntrySize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 const TreeNodeRow: React.FC<TreeNodeProps> = ({
@@ -90,7 +86,7 @@ const TreeNodeRow: React.FC<TreeNodeProps> = ({
           if (entry.isDirectory) onToggleDir(entry.path)
           else onOpenFile(entry.path)
         }}
-        className="group flex h-[25px] items-center gap-1.5 pr-2 cursor-pointer text-[13px]"
+        className="group relative flex h-[25px] items-center gap-1.5 pr-2 cursor-pointer text-[13px] select-none"
         style={{
           paddingLeft: `${10 + depth * 14}px`,
           backgroundColor: isDropHighlight ? 'rgba(166, 226, 46, 0.2)' : 'transparent'
@@ -101,8 +97,20 @@ const TreeNodeRow: React.FC<TreeNodeProps> = ({
         onMouseLeave={(e) => {
           if (!isDropHighlight) e.currentTarget.style.backgroundColor = 'transparent'
         }}
-        title={`${entry.path}${env.kind === 'ssh' ? ' (Drag between trees to transfer, or ⌥+Drag to Finder)' : ''}`}
+        title={`${entry.path}${!entry.isDirectory ? ` (${formatEntrySize(entry.size)})` : ''}${entry.isSymlink ? ' [symlink]' : ''}${env.kind === 'ssh' ? ' · Drag between trees to transfer, or ⌥+Drag to Finder' : ''}`}
       >
+        {depth > 0 &&
+          Array.from({ length: depth }).map((_, lvl) => (
+            <span
+              key={lvl}
+              className="pointer-events-none absolute top-0 bottom-0 w-px opacity-25"
+              style={{
+                left: `${17 + lvl * 14}px`,
+                backgroundColor: 'var(--st-border-light)'
+              }}
+            />
+          ))}
+
         <span className="flex w-4 shrink-0 items-center justify-center" style={{ color: 'var(--st-text-dim)' }}>
           {entry.isDirectory ? (
             isOpen ? (
@@ -114,13 +122,9 @@ const TreeNodeRow: React.FC<TreeNodeProps> = ({
         </span>
 
         {entry.isDirectory ? (
-          isOpen ? (
-            <FolderOpen className="h-4 w-4 shrink-0" style={{ color: 'var(--st-text-muted)' }} />
-          ) : (
-            <Folder className="h-4 w-4 shrink-0" style={{ color: 'var(--st-text-dim)' }} />
-          )
+          <FolderIcon name={entry.name} isOpen={isOpen} size={16} />
         ) : (
-          <FileCode className="h-4 w-4 shrink-0" style={{ color: getFileIconColor(entry.name) }} />
+          <FileIcon name={entry.name} size={15} />
         )}
 
         <span
@@ -138,6 +142,12 @@ const TreeNodeRow: React.FC<TreeNodeProps> = ({
         >
           {entry.name}
         </span>
+
+        {entry.isSymlink && !isLoading && (
+          <span className="text-[10px] font-mono opacity-45 shrink-0" title="Symbolic link">
+            ↗
+          </span>
+        )}
 
         {isLoading && (
           <RefreshCw className="h-3 w-3 animate-spin shrink-0" style={{ color: 'var(--st-text-dim)' }} />
@@ -515,6 +525,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
                         className={`h-3 w-3 ${tab.isDirty ? 'hidden group-hover:block' : 'opacity-40 group-hover:opacity-100'}`}
                       />
                     </button>
+                    <FileIcon name={tab.name} size={14} />
                     <span className="truncate flex-1">{tab.name}</span>
                     {tabEnv && tabEnv.kind === 'ssh' && (
                       <span className="text-[11px] font-mono shrink-0" style={{ color: 'var(--st-text-dim)' }}>
@@ -571,6 +582,16 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
           >
             {showHidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
           </button>
+          {expanded.size > 0 && (
+            <button
+              onClick={() => setExpanded(new Set())}
+              title="Collapse All Folders"
+              className="rounded p-1 hover:bg-white/10"
+              style={{ color: 'var(--st-text-dim)' }}
+            >
+              <ChevronsDownUp className="h-3.5 w-3.5" />
+            </button>
+          )}
           <button
             onClick={() => void loadDirectory(resolvedRoot, true)}
             title="Refresh"
@@ -806,6 +827,37 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/10"
           >
             <Terminal className="h-4 w-4" /> Split Terminal Here
+          </button>
+
+            <div className="my-1 border-t" style={{ borderColor: 'var(--st-border)' }} />
+
+          <button
+            onClick={() => {
+              const parentDir = contextMenu.entry.isDirectory
+                ? contextMenu.entry.path
+                : contextMenu.entry.path.slice(0, contextMenu.entry.path.lastIndexOf('/')) || '/'
+              if (contextMenu.entry.isDirectory && !expanded.has(parentDir)) {
+                handleToggleDir(parentDir)
+              }
+              setInlinePrompt({ mode: 'new-file', parentDir, value: '' })
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/10"
+          >
+            <FilePlus className="h-4 w-4" /> New File...
+          </button>
+          <button
+            onClick={() => {
+              const parentDir = contextMenu.entry.isDirectory
+                ? contextMenu.entry.path
+                : contextMenu.entry.path.slice(0, contextMenu.entry.path.lastIndexOf('/')) || '/'
+              if (contextMenu.entry.isDirectory && !expanded.has(parentDir)) {
+                handleToggleDir(parentDir)
+              }
+              setInlinePrompt({ mode: 'new-folder', parentDir, value: '' })
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/10"
+          >
+            <FolderPlus className="h-4 w-4" /> New Folder...
           </button>
 
           <div className="my-1 border-t" style={{ borderColor: 'var(--st-border)' }} />

@@ -2,15 +2,18 @@ import React from 'react'
 import {
   ArrowLeftRight,
   Columns2,
+  Laptop,
   PanelBottom,
   PanelLeft,
   Search,
+  Server,
   Settings,
   Square,
   Terminal,
   UploadCloud
 } from 'lucide-react'
 import type { LayoutMode } from '@shared/types'
+import logoUrl from '@renderer/assets/logo.png'
 import { useAppStore } from '@renderer/stores/useAppStore'
 
 export const TopToolbar: React.FC = () => {
@@ -57,28 +60,50 @@ export const TopToolbar: React.FC = () => {
       className="drag-region flex h-[38px] shrink-0 items-center justify-between border-b pl-[80px] pr-3 select-none"
       style={{ backgroundColor: 'var(--st-titlebar)', borderColor: 'var(--st-border)' }}
     >
-      {/* Left: Quick Workspace Tabs (always visible for instant switching between workspaces!) */}
-      <div className="no-drag flex items-center gap-1">
+      {/* Left: App Brand Logo + Quick Workspace Tabs */}
+      <div className="no-drag flex items-center gap-1 min-w-0 overflow-x-auto">
+        <div
+          className="flex items-center gap-1.5 pr-2 mr-1 border-r shrink-0"
+          style={{ borderColor: 'var(--st-border-light)' }}
+          title="MultiplexIDE — Multi-Environment Workspace"
+        >
+          <img src={logoUrl} alt="MultiplexIDE" className="h-[20px] w-[20px] rounded-[4px] shrink-0" draggable={false} />
+          <span className="text-[12.5px] font-semibold tracking-tight hidden md:inline" style={{ color: 'var(--st-text)' }}>
+            MultiplexIDE
+          </span>
+        </div>
+
         {environments.map((env) => {
           const isActive = env.id === activeEnvId
+          const dotColor =
+            env.status === 'connected'
+              ? 'var(--st-green)'
+              : env.status === 'connecting'
+                ? 'var(--st-yellow)'
+                : env.status === 'error'
+                  ? 'var(--st-red)'
+                  : 'var(--st-text-dim)'
           return (
             <button
               key={env.id}
               onClick={() => setActiveEnv(env.id)}
-              className="flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-[12px] transition-colors"
+              className="flex items-center gap-1.5 rounded px-2.5 py-1 text-[12px] transition-colors shrink-0"
               style={{
                 backgroundColor: isActive ? 'var(--st-sidebar-active)' : 'transparent',
-                color: isActive ? 'var(--st-text)' : 'var(--st-text-dim)'
+                color: isActive ? 'var(--st-text)' : 'var(--st-text-dim)',
+                borderBottom: isActive ? `2px solid ${env.color}` : '2px solid transparent'
               }}
-              title={`Switch to ${env.name}`}
+              title={`Switch to ${env.name} (${env.kind === 'local' ? 'local' : env.status})`}
             >
               <span
-                className="h-2 w-2 rounded-full"
-                style={{
-                  backgroundColor:
-                    env.status === 'connected' ? 'var(--st-green)' : 'var(--st-text-dim)'
-                }}
+                className={`h-2 w-2 rounded-full ${env.status === 'connecting' ? 'st3-attention-pulse' : ''}`}
+                style={{ backgroundColor: dotColor }}
               />
+              {env.kind === 'local' ? (
+                <Laptop className="h-3 w-3 opacity-70" />
+              ) : (
+                <Server className="h-3 w-3 opacity-70" />
+              )}
               <span className="font-mono">{env.name}</span>
             </button>
           )
