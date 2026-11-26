@@ -218,6 +218,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
   const setShowTransferDrawer = useAppStore((s) => s.setShowTransferDrawer)
   const addToast = useAppStore((s) => s.addToast)
   const bumpDirRefresh = useAppStore((s) => s.bumpDirRefresh)
+  const retargetTabsForPath = useAppStore((s) => s.retargetTabsForPath)
 
   const env = environments.find((e) => e.id === envId)
   const rootPath = envRootPaths[envId] || env?.defaultPath || '~'
@@ -370,6 +371,28 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
     e.dataTransfer.setData('text/plain', entry.path)
   }
 
+  const parentOf = (p: string) => p.slice(0, p.lastIndexOf('/')) || '/'
+
+  /**
+   * Refreshes every directory affected by a mutation (not just the root!) and prunes cached children /
+   * expanded state under a path that no longer exists, so renamed/moved/deleted entries never linger.
+   */
+  const refreshAfterMutation = (dirs: string[], removedPath?: string) => {
+    if (removedPath) {
+      const under = (k: string) => k === removedPath || k.startsWith(removedPath + '/')
+      setChildrenMap((prev) => {
+        const next: Record<string, FileEntry[]> = {}
+        for (const [k, v] of Object.entries(prev)) if (!under(k)) next[k] = v
+        return next
+      })
+      setExpanded((prev) => new Set(Array.from(prev).filter((p) => !under(p))))
+    }
+    for (const d of Array.from(new Set(dirs))) {
+      if (d === resolvedRoot) void loadDirectory(resolvedRoot, true)
+      else if (expandedRef.current.has(d)) void loadDirectory(d, false)
+    }
+  }
+
   const handleDropOnDir = async (e: React.DragEvent, targetDir: string) => {
     e.preventDefault()
     e.stopPropagation()
@@ -384,8 +407,9 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
           if (destPath === src.path || targetDir.startsWith(src.path + '/')) return
           await window.multiplex.renameEntry(env.id, src.path, destPath)
           addToast('success', `Moved ${src.name} → ${targetDir}`)
+          retargetTabsForPath(env.id, src.path, destPath)
+          refreshAfterMutation([parentOf(src.path), targetDir, resolvedRoot], src.path)
           bumpDirRefresh(env.id)
-          void loadDirectory(resolvedRoot, true)
           return
         }
         setShowTransferDrawer(true)
@@ -436,18 +460,20 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
         const full = `${inlinePrompt.parentDir.replace(/\/$/, '')}/${name}`
         await window.multiplex.createFile(env.id, full)
         void openFile(env.id, full)
+        refreshAfterMutation([inlinePrompt.parentDir, resolvedRoot])
       } else if (inlinePrompt.mode === 'new-folder') {
         const full = `${inlinePrompt.parentDir.replace(/\/$/, '')}/${name}`
         await window.multiplex.mkdir(env.id, full)
+        refreshAfterMutation([inlinePrompt.parentDir, resolvedRoot])
       } else if (inlinePrompt.mode === 'rename' && inlinePrompt.targetEntry) {
-        const parent =
-          inlinePrompt.targetEntry.path.slice(0, inlinePrompt.targetEntry.path.lastIndexOf('/')) || '/'
+        const oldPath = inlinePrompt.targetEntry.path
+        const parent = parentOf(oldPath)
         const nextPath = `${parent.replace(/\/$/, '')}/${name}`
-        await window.multiplex.renameEntry(env.id, inlinePrompt.targetEntry.path, nextPath)
-      }
-      void loadDirectory(resolvedRoot, true)
-      if (expandedRef.current.has(inlinePrompt.parentDir)) {
-        void loadDirectory(inlinePrompt.parentDir, false)
+        if (nextPath !== oldPath) {
+          await window.multiplex.renameEntry(env.id, oldPath, nextPath)
+          retargetTabsForPath(env.id, oldPath, nextPath)
+          refreshAfterMutation([parent, resolvedRoot], oldPath)
+        }
       }
     } catch (err: any) {
       addToast('error', err?.message || String(err))
@@ -462,7 +488,7 @@ export const SingleEnvFileTree: React.FC<SingleEnvTreeProps> = ({
     try {
       await window.multiplex.deleteEntry(env.id, entry.path)
       addToast('info', `Deleted ${entry.name}`)
-      void loadDirectory(resolvedRoot, true)
+      refreshAfterMutation([parentOf(entry.path), resolvedRoot], entry.path)
     } catch (err: any) {
       addToast('error', `Delete failed: ${err?.message || err}`)
     }

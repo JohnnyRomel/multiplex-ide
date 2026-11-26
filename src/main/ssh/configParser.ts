@@ -262,30 +262,34 @@ export class EnvironmentRegistry {
   }
 
   private loadOrSeedConfig(): void {
+    if (!fs.existsSync(this.configPath)) {
+      // Only seed defaults when there is genuinely no config file yet
+      this.config = createDefaultConfig()
+      this.saveConfig()
+      return
+    }
     try {
-      if (fs.existsSync(this.configPath)) {
-        const raw = fs.readFileSync(this.configPath, 'utf8')
-        const parsed = JSON.parse(raw) as Partial<MultiplexConfigFile>
-        if (Array.isArray(parsed.workspaces) && parsed.workspaces.length > 0) {
-          this.config = {
-            theme: parsed.theme || 'monokai',
-            editorFontSize: typeof parsed.editorFontSize === 'number' ? parsed.editorFontSize : 15,
-            terminalFontSize: typeof parsed.terminalFontSize === 'number' ? parsed.terminalFontSize : 14,
-            showAllSshConfigHosts: Boolean(parsed.showAllSshConfigHosts),
-            extraPathDirs: Array.isArray(parsed.extraPathDirs) ? parsed.extraPathDirs : [],
-            workspaces: parsed.workspaces
-          }
-          return
+      const raw = fs.readFileSync(this.configPath, 'utf8')
+      const parsed = JSON.parse(raw) as Partial<MultiplexConfigFile>
+      if (Array.isArray(parsed.workspaces)) {
+        const workspaces = parsed.workspaces.length > 0 ? parsed.workspaces : createDefaultConfig().workspaces
+        this.config = {
+          theme: parsed.theme || 'monokai',
+          editorFontSize: typeof parsed.editorFontSize === 'number' ? parsed.editorFontSize : 15,
+          terminalFontSize: typeof parsed.terminalFontSize === 'number' ? parsed.terminalFontSize : 14,
+          showAllSshConfigHosts: Boolean(parsed.showAllSshConfigHosts),
+          extraPathDirs: Array.isArray(parsed.extraPathDirs) ? parsed.extraPathDirs : [],
+          workspaces
         }
       }
+      // A file without a `workspaces` array keeps the previously loaded config in memory and is NEVER
+      // overwritten on disk (the user may be mid-edit; silently replacing it destroyed their settings).
     } catch {
-      if (fs.existsSync(this.configPath)) {
-        return
-      }
+      // Invalid JSON (e.g. a half-typed edit): keep the last good in-memory config, never touch the file
     }
-
-    this.config = createDefaultConfig()
-    this.saveConfig()
+    if (!this.config) {
+      this.config = createDefaultConfig()
+    }
   }
 
   private saveConfig(): void {

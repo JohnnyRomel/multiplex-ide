@@ -11,6 +11,7 @@ import {
 import {
   SshControlMaster,
   classifySshError,
+  isChannelLimitError,
   parseControlMasterPid
 } from '../src/main/ssh/controlMaster'
 import {
@@ -21,7 +22,7 @@ import {
   parseRecoverableTmuxOutput,
   stripEraseScrollback
 } from '../src/main/terminal/terminalManager'
-import { UnifiedVfs } from '../src/main/fs/vfs'
+import { UnifiedVfs, decodeTextBuffer } from '../src/main/fs/vfs'
 import { TransferManager } from '../src/main/fs/transferManager'
 import { SearchManager, parseGrepLine, parseRgJsonLine, scoreQuickOpenCandidate } from '../src/main/search/searchManager'
 import { enhancedCppLanguage, enhancedPythonLanguage } from '../src/shared/syntaxGrammars'
@@ -158,6 +159,19 @@ describe('Search Parsers & End-to-End Local Search / Goto Files', () => {
       column: 7,
       matchLength: 9
     })
+
+    // rg submatch offsets are UTF-8 BYTES: "中文 " is 7 bytes but 3 JS chars
+    const cjkLine = JSON.stringify({
+      type: 'match',
+      data: {
+        path: { text: '/repo/a.md' },
+        lines: { text: '中文 multiplex\n' },
+        line_number: 1,
+        submatches: [{ start: 7, end: 16 }]
+      }
+    })
+    const cjk = parseRgJsonLine(cjkLine, 's1', 'local', '/repo')
+    expect(cjk[0]).toMatchObject({ column: 4, matchLength: 9 })
   })
 
   it('computes accurate match column in grep fallback parser', () => {
@@ -308,6 +322,22 @@ describe('Unified VFS & TransferManager', () => {
     const txtRead = await vfs.readFile(localEnv, path.join(srcDir, 'hello.txt'))
     expect(txtRead.isBinary).toBe(false)
     expect(txtRead.content).toBe('hello multiplex')
+    expect(txtRead.readOnly).toBeUndefined()
+
+    // Non-UTF-8 (GBK "你好") is decoded for display but flagged read-only so saving can't corrupt it
+    const gbk = decodeTextBuffer(Buffer.from([0xc4, 0xe3, 0xba, 0xc3]))
+    expect(gbk).toEqual({ content: '你好', readOnly: true, encoding: 'GB18030' })
+    // UTF-8 BOM survives as U+FEFF so it round-trips on save
+    expect(decodeTextBuffer(Buffer.from([0xef, 0xbb, 0xbf, 0x61])).content).toBe('\ufeffa')
+    expect(decodeTextBuffer(Buffer.from('中文 ok', 'utf8'))).toEqual({ content: '中文 ok' })
+
+    // Local rename must refuse to silently overwrite an existing destination
+    fs.writeFileSync(path.join(srcDir, 'other.txt'), 'keep me')
+    await expect(
+      vfs.rename(localEnv, path.join(srcDir, 'hello.txt'), path.join(srcDir, 'other.txt'))
+    ).rejects.toThrow(/already exists/)
+    expect(fs.readFileSync(path.join(srcDir, 'other.txt'), 'utf8')).toBe('keep me')
+    fs.rmSync(path.join(srcDir, 'other.txt'))
 
     const task = await tm.enqueue(localEnv, localEnv, {
       sourceEnvId: 'local',
@@ -391,6 +421,13 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
 
     const reuseArgs = cm.buildBaseSshArgs(sshEnv, { batchMode: true, reuseOnly: true })
     expect(reuseArgs).toContain('ControlMaster=no')
+    // Strict mux-only: a dead socket must fail fast instead of silently dialing a fresh connection
+    expect(reuseArgs).toContain('ProxyCommand=/usr/bin/false')
+
+    // sshd MaxSessions refusals mean the transport is ALIVE (never tear the shared master down)
+    expect(isChannelLimitError('channel 11: open failed: administratively prohibited: open failed')).toBe(true)
+    expect(isChannelLimitError('mux_client_request_session: session request failed: Session open refused by peer')).toBe(true)
+    expect(isChannelLimitError('Connection timed out during banner exchange')).toBe(false)
 
     // Default ControlPath must stay well below macOS 104-byte Unix socket limit (leaving >= 17B for OpenSSH suffix)
     const defaultCm = new SshControlMaster()

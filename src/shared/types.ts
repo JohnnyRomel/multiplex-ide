@@ -149,6 +149,9 @@ export interface FileReadResult {
   size: number
   isBinary: boolean
   mtimeMs: number
+  /** True when the bytes are not valid UTF-8 (content is a lossy decode; never save it back) */
+  readOnly?: boolean
+  encoding?: string
 }
 
 export interface SearchTarget {

@@ -91,20 +91,23 @@ export function registerIpcHandlers(services: MainServices): void {
 
   ipcMain.handle(IPC.ENV_CONNECT, async (_e, envId: string) => {
     const env = requireEnv(envId)
+    // Always re-read from the registry before broadcasting: a config reload during the (slow) dial
+    // replaces the env objects, and broadcasting the stale one left the UI stuck on "connecting".
+    const latest = () => registry.get(envId) || env
     if (env.kind === 'local') {
       registry.setStatus(envId, 'connected')
-      broadcastEnvStatus(env)
-      return { ok: true, env }
+      broadcastEnvStatus(latest())
+      return { ok: true, env: latest() }
     }
 
     registry.setStatus(envId, 'connecting')
-    broadcastEnvStatus(env)
+    broadcastEnvStatus(latest())
 
-    const result = await controlMaster.connect(env)
+    const result = await controlMaster.connect(latest())
     if (result.ok) {
       registry.setStatus(envId, 'connected', undefined)
-      broadcastEnvStatus(env)
-      return { ok: true, env }
+      broadcastEnvStatus(latest())
+      return { ok: true, env: latest() }
     }
 
     registry.setStatus(
@@ -112,8 +115,8 @@ export function registerIpcHandlers(services: MainServices): void {
       result.needsInteractiveAuth ? 'disconnected' : 'error',
       result.needsInteractiveAuth ? 'Interactive auth required — login in terminal' : result.error
     )
-    broadcastEnvStatus(env)
-    return { ok: false, needsInteractiveAuth: result.needsInteractiveAuth, error: result.error, env }
+    broadcastEnvStatus(latest())
+    return { ok: false, needsInteractiveAuth: result.needsInteractiveAuth, error: result.error, env: latest() }
   })
 
   ipcMain.handle(IPC.ENV_DISCONNECT, async (_e, envId: string) => {
@@ -152,6 +155,10 @@ export function registerIpcHandlers(services: MainServices): void {
 
   ipcMain.on(IPC.TERM_WRITE, (_e, terminalId: string, data: string) => {
     terminalManager.write(terminalId, data)
+  })
+
+  ipcMain.on(IPC.TERM_READY, (_e, terminalId: string) => {
+    terminalManager.markRendererReady(terminalId)
   })
 
   ipcMain.on(IPC.TERM_RESIZE, (_e, terminalId: string, cols: number, rows: number) => {

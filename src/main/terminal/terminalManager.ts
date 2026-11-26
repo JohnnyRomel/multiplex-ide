@@ -11,13 +11,17 @@ import type {
   TerminalStatusEvent
 } from '@shared/types'
 import { expandLocalTilde } from '../ssh/configParser'
-import { buildEnrichedEnv, type SshControlMaster } from '../ssh/controlMaster'
+import { buildEnrichedEnv, isChannelLimitError, type SshControlMaster } from '../ssh/controlMaster'
 
 // Progressive backoff covering ~100s of VPN roam / gateway hiccup / server reboot without hammering proxies
 const RECONNECT_BACKOFF_MS = [2000, 3500, 5000, 8000, 12000, 16000, 22000, 30000]
 const DEFAULT_RECENT_TMUX_MAX_AGE_SEC = 3600
 const HEALTH_CHECK_INTERVAL_MS = 25_000
 const STABLE_CONNECTION_RESET_MS = 10_000
+const MAX_PENDING_OUTPUT_BYTES = 256 * 1024
+// Hard safety cap: macOS only has ~511 PTYs system-wide (kern.tty.ptmx_max); never let a bug or
+// runaway reconnect exhaust them for every other app on the machine.
+const MAX_LIVE_PTYS = 96
 const IDLE_SHELL_COMMANDS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'csh', 'tcsh'])
 
 let checkedSpawnHelperPerms = false
@@ -89,10 +93,14 @@ interface ManagedTerminal {
   options: TerminalCreateOptions
   oscBuffer: string
   recentOutputTail: string
+  rendererReady: boolean
+  pendingOutput: string[]
+  pendingBytes: number
   tmuxSession?: string
   attachRecentPending: boolean
   awaitingTmuxAttach: boolean
   awaitingInteractiveAuth: boolean
+  stoppedIntentionally: boolean
   tmuxAttachWaiters: Array<() => void>
   state: TerminalStatusEvent['state']
   closedByUser: boolean
@@ -387,10 +395,14 @@ export class TerminalManager {
       options: { ...options, cols, rows, useTmux },
       oscBuffer: '',
       recentOutputTail: '',
+      rendererReady: false,
+      pendingOutput: [],
+      pendingBytes: 0,
       tmuxSession,
       attachRecentPending,
       awaitingTmuxAttach: attachRecentPending,
       awaitingInteractiveAuth: false,
+      stoppedIntentionally: false,
       tmuxAttachWaiters: [],
       state: env.kind === 'local' ? 'connected' : 'connecting',
       closedByUser: false,
@@ -412,7 +424,7 @@ export class TerminalManager {
     void this.prepareAndSpawnPty(managed).catch((err) => {
       if (managed.closedByUser) return
       managed.state = 'disconnected'
-      this.events.onData(managed.info.id, `\r\n\x1b[31mFailed to initialize terminal: ${err?.message || err}\x1b[0m\r\n`)
+      this.pushData(managed.info.id, `\r\n\x1b[31mFailed to initialize terminal: ${err?.message || err}\x1b[0m\r\n`)
       this.emitStatus(managed, { message: err?.message || 'Failed to initialize terminal' })
     })
     return info
@@ -423,6 +435,50 @@ export class TerminalManager {
     if (managed.tmuxAttachWaiters.length === 0) return
     const waiters = managed.tmuxAttachWaiters.splice(0, managed.tmuxAttachWaiters.length)
     for (const fn of waiters) fn()
+  }
+
+  /**
+   * Forwards PTY output to the renderer, buffering (bounded, tail-preserving) until the renderer's
+   * xterm has subscribed so the first prompt / SSH banner / auth prompt is never lost.
+   */
+  private pushData(terminalId: string, data: string): void {
+    if (!data) return
+    const managed = this.sessions.get(terminalId)
+    if (!managed || managed.rendererReady) {
+      this.events.onData(terminalId, data)
+      return
+    }
+    managed.pendingOutput.push(data)
+    managed.pendingBytes += data.length
+    while (managed.pendingBytes > MAX_PENDING_OUTPUT_BYTES && managed.pendingOutput.length > 1) {
+      managed.pendingBytes -= managed.pendingOutput.shift()!.length
+    }
+  }
+
+  /** Called once the renderer xterm for `terminalId` is subscribed; flushes buffered output. */
+  markRendererReady(terminalId: string): void {
+    const managed = this.sessions.get(terminalId)
+    if (!managed || managed.rendererReady) return
+    managed.rendererReady = true
+    const buffered = managed.pendingOutput.join('')
+    managed.pendingOutput = []
+    managed.pendingBytes = 0
+    if (buffered) this.events.onData(terminalId, buffered)
+  }
+
+  private countLivePtys(): number {
+    let n = 0
+    for (const s of this.sessions.values()) if (s.ptyProcess) n++
+    return n
+  }
+
+  private killPty(p: pty.IPty | null): void {
+    if (!p) return
+    try {
+      p.kill()
+    } catch {
+      // ignore
+    }
   }
 
   private clearPaneTimers(managed: ManagedTerminal): void {
@@ -573,7 +629,7 @@ export class TerminalManager {
     managed.options.tmuxSession = nextSession
     managed.isReattach = !isFresh
 
-    this.events.onData(
+    this.pushData(
       managed.info.id,
       `\r\n\x1b[36m─── Switching pane to tmux session ${nextSession}${isFresh ? ' (new)' : ''}... ───\x1b[0m\r\n`
     )
@@ -758,6 +814,24 @@ export class TerminalManager {
     if (managed.closedByUser) return
     this.clearPaneTimers(managed)
 
+    // Never orphan a still-running PTY (each one holds one of macOS's ~511 system-wide PTYs!)
+    if (managed.ptyProcess) {
+      const stale = managed.ptyProcess
+      managed.ptyProcess = null
+      this.killPty(stale)
+    }
+
+    if (this.countLivePtys() >= MAX_LIVE_PTYS) {
+      this.resolveTmuxAttachWaiters(managed)
+      managed.state = 'disconnected'
+      this.pushData(
+        managed.info.id,
+        `\r\n\x1b[31m─── Too many open terminals (${MAX_LIVE_PTYS}). Close some panes, then press Enter to retry ───\x1b[0m\r\n`
+      )
+      this.emitStatus(managed, { message: 'Too many open terminals' })
+      return
+    }
+
     const { env, options } = managed
     const spawnGen = managed.spawnGeneration
     const cols = managed.info.cols || 100
@@ -851,7 +925,7 @@ export class TerminalManager {
       const errMsg = (spawnErr as Error)?.message || String(spawnErr || 'Failed to spawn PTY')
       this.resolveTmuxAttachWaiters(managed)
       managed.state = 'disconnected'
-      this.events.onData(
+      this.pushData(
         managed.info.id,
         `\r\n\x1b[31mFailed to spawn ${env.kind === 'local' ? 'local shell' : 'SSH'} PTY: ${errMsg}\x1b[0m\r\n` +
           `\x1b[90m─── Press Enter to retry ───\x1b[0m\r\n`
@@ -943,7 +1017,7 @@ export class TerminalManager {
       }
 
       if (data) {
-        this.events.onData(managed.info.id, data)
+        this.pushData(managed.info.id, data)
       }
 
       if (env.kind === 'ssh' && managed.state !== 'connected' && Date.now() - managed.lastSpawnAt > 800) {
@@ -1009,7 +1083,10 @@ export class TerminalManager {
   ): Promise<void> {
     // Verify REAL end-to-end reachability (not just local mux PID!) so a wedged/half-open
     // ControlMaster is detected immediately and NEVER misclassified as healthy or clean exit!
-    const masterHealthy = await this.controlMaster.verifyEndToEnd(managed.env, 3500).catch(() => false)
+    // A channel refused by sshd (MaxSessions) means the transport itself is alive.
+    const channelRefused = isChannelLimitError(managed.recentOutputTail)
+    const masterHealthy =
+      channelRefused || (await this.controlMaster.verifyEndToEnd(managed.env, 3500).catch(() => false))
 
     // Guard against concurrent reconnect() / close() while awaiting health probe
     if (managed.closedByUser || managed.spawnGeneration !== spawnGen || managed.ptyProcess !== null) {
@@ -1030,7 +1107,8 @@ export class TerminalManager {
     // NEVER auto-reconnect in a loop or the two panes will ping-pong detach each other!
     if (masterHealthy && detachedByTmux && exitCode === 0) {
       managed.state = 'disconnected'
-      this.events.onData(
+      managed.stoppedIntentionally = true
+      this.pushData(
         managed.info.id,
         `\r\n\x1b[90m─── Detached from tmux session${managed.tmuxSession ? ` (${managed.tmuxSession})` : ''}. Press Enter or click ↻ to re-attach ───\x1b[0m\r\n`
       )
@@ -1041,7 +1119,8 @@ export class TerminalManager {
     // Clean shell exit (`exit` / Ctrl-D) while SSH transport is genuinely healthy
     if (masterHealthy && exitCode === 0 && livedMs > 3000) {
       managed.state = 'disconnected'
-      this.events.onData(
+      managed.stoppedIntentionally = true
+      this.pushData(
         managed.info.id,
         `\r\n\x1b[90m─── Session ended (exit ${exitCode}). Press Enter or click ↻ to reconnect ───\x1b[0m\r\n`
       )
@@ -1053,7 +1132,8 @@ export class TerminalManager {
     if (managed.awaitingInteractiveAuth) {
       managed.awaitingInteractiveAuth = false
       managed.state = 'disconnected'
-      this.events.onData(
+      managed.stoppedIntentionally = true
+      this.pushData(
         managed.info.id,
         `\r\n\x1b[33m─── Interactive authentication ended. Press Enter or click ↻ to retry ───\x1b[0m\r\n`
       )
@@ -1061,24 +1141,30 @@ export class TerminalManager {
       return
     }
 
-    // Abnormal disconnect or fast channel failure: force master teardown when transport failed OR exited fast (<5s)
-    const forceMasterReset = !masterHealthy || livedMs < 5000
-    this.scheduleAutoReconnect(managed, exitCode, { forceMasterReset })
+    // Abnormal disconnect or fast channel failure. `ensureHealthyMaster()` re-verifies end-to-end and
+    // only tears the shared master down if it is genuinely dead — a single pane failing must never
+    // kill every sibling pane multiplexed over the same healthy connection.
+    this.scheduleAutoReconnect(managed, exitCode)
   }
 
   private scheduleAutoReconnect(
     managed: ManagedTerminal,
     exitCode?: number,
-    opts?: { forceMasterReset?: boolean; lastError?: string }
+    opts?: { lastError?: string }
   ): void {
     if (managed.closedByUser || managed.reconnectPaused) return
+    // Never stack two pending retry timers on one pane (would double-spawn & orphan a PTY)
+    if (managed.reconnectTimer) {
+      clearTimeout(managed.reconnectTimer)
+      managed.reconnectTimer = null
+    }
     const attempt = managed.reconnectAttempt + 1
     const maxAttempts = RECONNECT_BACKOFF_MS.length
 
     if (attempt > maxAttempts) {
       managed.state = 'disconnected'
       const reason = opts?.lastError ? ` (${summarizeSshError(opts.lastError)})` : ''
-      this.events.onData(
+      this.pushData(
         managed.info.id,
         `\r\n\x1b[31m─── Disconnected from ${managed.env.name}${reason}. Press Enter, Space, or click ↻ to reconnect ───\x1b[0m\r\n`
       )
@@ -1102,7 +1188,7 @@ export class TerminalManager {
     const reason = opts?.lastError
       ? summarizeSshError(opts.lastError)
       : `code ${exitCode ?? '?'}`
-    this.events.onData(
+    this.pushData(
       managed.info.id,
       `\r\n\x1b[33m─── Connection lost (${reason}). Reconnecting to ${managed.env.name} in ${(baseDelay / 1000).toFixed(1)}s (${attempt}/${maxAttempts})... ───\x1b[0m\r\n`
     )
@@ -1115,19 +1201,14 @@ export class TerminalManager {
     })
 
     const scheduledGen = managed.spawnGeneration
-    const shouldForceMasterReset = Boolean(opts?.forceMasterReset || attempt >= 2)
     managed.reconnectTimer = setTimeout(async () => {
       managed.reconnectTimer = null
       if (managed.closedByUser || managed.reconnectPaused || managed.spawnGeneration !== scheduledGen) return
 
-      // Coordinate ONE shared end-to-end healthy ControlMaster per host BEFORE spawning any pane PTY!
-      // `allowReuseRecentMs: 8000` guarantees a lagging sibling tab reuses a fresh master just established
-      // by another tab instead of tearing it down!
+      // Coordinate ONE shared end-to-end healthy ControlMaster per host BEFORE spawning any pane PTY
+      // (deduplicated across all panes; only replaced when end-to-end verification fails).
       const masterRes = await this.controlMaster
-        .ensureHealthyMaster(managed.env, {
-          forceReset: shouldForceMasterReset,
-          allowReuseRecentMs: 8000
-        })
+        .ensureHealthyMaster(managed.env)
         .catch((err) => ({ ok: false as const, error: String(err?.message || err) }))
 
       if (managed.closedByUser || managed.reconnectPaused || managed.spawnGeneration !== scheduledGen) return
@@ -1143,7 +1224,8 @@ export class TerminalManager {
       if ('nonRetryable' in masterRes && masterRes.nonRetryable) {
         const msg = summarizeSshError(masterRes.error)
         managed.state = 'disconnected'
-        this.events.onData(
+        managed.stoppedIntentionally = true
+        this.pushData(
           managed.info.id,
           `\r\n\x1b[31m─── SSH error: ${msg}. Fix SSH config/keys then click ↻ to reconnect ───\x1b[0m\r\n`
         )
@@ -1155,7 +1237,7 @@ export class TerminalManager {
         // Spawn ONE interactive SSH PTY so the user can enter password / 2FA without auto-looping
         managed.awaitingInteractiveAuth = true
         managed.isReattach = true
-        this.events.onData(
+        this.pushData(
           managed.info.id,
           `\r\n\x1b[36m─── Interactive SSH authentication required for ${managed.env.name}... ───\x1b[0m\r\n`
         )
@@ -1165,7 +1247,6 @@ export class TerminalManager {
 
       // Transport still unavailable (VPN/Wi-Fi/gateway down): back off cleanly WITHOUT spawning doomed PTYs!
       this.scheduleAutoReconnect(managed, exitCode, {
-        forceMasterReset: true,
         lastError: masterRes.error
       })
     }, delayMs)
@@ -1227,17 +1308,18 @@ export class TerminalManager {
     }
 
     managed.reconnectAttempt = 0
+    managed.stoppedIntentionally = false
     managed.isReattach = true
     managed.state = 'reconnecting'
     this.emitStatus(managed, { message: 'Reconnecting...' })
-    this.events.onData(
+    this.pushData(
       managed.info.id,
       `\r\n\x1b[36m─── Reconnecting to ${managed.env.name}${managed.tmuxSession ? ` (session ${managed.tmuxSession})` : ''}... ───\x1b[0m\r\n`
     )
 
     if (managed.env.kind === 'ssh') {
       const masterRes = await this.controlMaster
-        .ensureHealthyMaster(managed.env, { forceReset: Boolean(opts?.forceReset) })
+        .ensureHealthyMaster(managed.env)
         .catch((err) => ({ ok: false as const, error: String(err?.message || err) }))
 
       if (managed.closedByUser || managed.reconnectPaused || managed.spawnGeneration !== gen) return
@@ -1252,7 +1334,8 @@ export class TerminalManager {
       if ('nonRetryable' in masterRes && masterRes.nonRetryable) {
         const msg = summarizeSshError(masterRes.error)
         managed.state = 'disconnected'
-        this.events.onData(managed.info.id, `\r\n\x1b[31m─── SSH error: ${msg} ───\x1b[0m\r\n`)
+        managed.stoppedIntentionally = true
+        this.pushData(managed.info.id, `\r\n\x1b[31m─── SSH error: ${msg} ───\x1b[0m\r\n`)
         this.emitStatus(managed, { message: msg })
         return
       }
@@ -1265,7 +1348,6 @@ export class TerminalManager {
 
       // Fresh dial failed — enter smooth progressive backoff with the real error displayed
       this.scheduleAutoReconnect(managed, 255, {
-        forceMasterReset: true,
         lastError: masterRes.error
       })
       return
@@ -1294,6 +1376,8 @@ export class TerminalManager {
       const byEnv = new Map<string, ManagedTerminal[]>()
       for (const managed of this.sessions.values()) {
         if (managed.env.kind !== 'ssh' || managed.closedByUser || managed.reconnectPaused) continue
+        // Wake/online must not resurrect panes the user exited/detached on purpose (only explicit Reconnect All does)
+        if (managed.stoppedIntentionally && !opts?.force) continue
         const list = byEnv.get(managed.env.id) || []
         list.push(managed)
         byEnv.set(managed.env.id, list)
@@ -1308,12 +1392,9 @@ export class TerminalManager {
             : panes
           if (targets.length === 0) return
 
-          if (!healthy) {
-            await this.controlMaster.resetControlSocket(env, { force: true }).catch(() => {})
-          }
-          // Pre-warm ONE shared healthy ControlMaster for this env before staggering pane re-attaches
+          // Establish ONE shared healthy ControlMaster for this env (replaced only if verification fails)
           const masterRes = await this.controlMaster
-            .ensureHealthyMaster(env, { forceReset: !healthy })
+            .ensureHealthyMaster(env)
             .catch((err) => ({ ok: false as const, error: String(err?.message || err) }))
 
           for (let i = 0; i < targets.length; i++) {
@@ -1327,7 +1408,7 @@ export class TerminalManager {
             } else {
               // Network/VPN not ready yet — hand off cleanly to progressive backoff (no burst!)
               p.reconnectAttempt = 0
-              this.scheduleAutoReconnect(p, 255, { forceMasterReset: true, lastError: masterRes.error })
+              this.scheduleAutoReconnect(p, 255, { lastError: masterRes.error })
             }
           }
         })
@@ -1363,7 +1444,7 @@ export class TerminalManager {
         }
       }
       managed.state = 'disconnected'
-      this.events.onData(
+      this.pushData(
         managed.info.id,
         `\r\n\x1b[90m─── Disconnected by user (scrollback preserved). Press Enter or click ↻ to reconnect ───\x1b[0m\r\n`
       )

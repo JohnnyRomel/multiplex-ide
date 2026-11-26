@@ -189,16 +189,24 @@ export function parseRgJsonLine(
       ]
     }
 
-    return submatches.map((sm) => ({
-      searchId,
-      envId,
-      filePath,
-      relativePath,
-      line: lineNum,
-      column: (sm.start ?? 0) + 1,
-      matchLength: Math.max(1, (sm.end ?? 0) - (sm.start ?? 0)),
-      lineText
-    }))
+    // rg reports submatch start/end as UTF-8 BYTE offsets; convert to JS string (UTF-16) indices so
+    // highlights & cursor columns are correct on lines containing CJK / emoji.
+    const lineBytes = Buffer.from(lineText, 'utf8')
+    const toCharIdx = (byteOff: number) => lineBytes.subarray(0, Math.max(0, byteOff)).toString('utf8').length
+    return submatches.map((sm) => {
+      const startCh = toCharIdx(sm.start ?? 0)
+      const endCh = toCharIdx(sm.end ?? 0)
+      return {
+        searchId,
+        envId,
+        filePath,
+        relativePath,
+        line: lineNum,
+        column: startCh + 1,
+        matchLength: Math.max(1, endCh - startCh),
+        lineText
+      }
+    })
   } catch {
     return []
   }
@@ -265,6 +273,40 @@ export function parseGrepLine(
 export class SearchManager {
   private activeProcs = new Map<string, Set<ChildProcess>>()
   private activeFileQueries = new Map<string, Set<ChildProcess>>()
+  // Ids cancelled before/while their processes were spawning (prefix match for per-env sub-requests)
+  private cancelledIds = new Map<string, number>()
+
+  private markCancelled(id: string): void {
+    const now = Date.now()
+    this.cancelledIds.set(id, now)
+    for (const [k, t] of this.cancelledIds) {
+      if (now - t > 60_000) this.cancelledIds.delete(k)
+    }
+  }
+
+  private isCancelled(id: string): boolean {
+    for (const k of this.cancelledIds.keys()) {
+      if (id === k || id.startsWith(k + '-')) return true
+    }
+    return false
+  }
+
+  /** Kills the whole process group for local searches (rg/find children of `zsh -c`), else the process. */
+  private killProc(p: ChildProcess): void {
+    try {
+      if ((p as any).__mideGroup && p.pid) {
+        process.kill(-p.pid, 'SIGTERM')
+        return
+      }
+    } catch {
+      // fall through to direct kill
+    }
+    try {
+      p.kill('SIGTERM')
+    } catch {
+      // ignore
+    }
+  }
 
   constructor(
     private controlMaster: SshControlMaster,
@@ -276,29 +318,21 @@ export class SearchManager {
   ) {}
 
   cancel(searchId: string): void {
+    this.markCancelled(searchId)
     const set = this.activeProcs.get(searchId)
     if (!set) return
-    for (const p of set) {
-      try {
-        p.kill('SIGTERM')
-      } catch {
-        // ignore
-      }
-    }
+    for (const p of set) this.killProc(p)
     this.activeProcs.delete(searchId)
   }
 
   cancelFileQuery(requestId: string): void {
-    const set = this.activeFileQueries.get(requestId)
-    if (!set) return
-    for (const p of set) {
-      try {
-        p.kill('SIGTERM')
-      } catch {
-        // ignore
-      }
+    // Quick Open registers one sub-request per env as `${requestId}-${envId}`; cancel them all
+    this.markCancelled(requestId)
+    for (const [key, set] of Array.from(this.activeFileQueries.entries())) {
+      if (key !== requestId && !key.startsWith(requestId + '-')) continue
+      for (const p of set) this.killProc(p)
+      this.activeFileQueries.delete(key)
     }
-    this.activeFileQueries.delete(requestId)
   }
 
   async startSearch(req: SearchRequest, envLookup: (envId: string) => Environment | undefined): Promise<void> {
@@ -322,6 +356,7 @@ export class SearchManager {
     const flushTimer = setInterval(flush, 40)
 
     const pushMatches = (items: SearchMatch[]) => {
+      if (this.isCancelled(req.searchId) && !truncated) return
       for (const m of items) {
         if (totalMatches >= maxResults) {
           truncated = true
@@ -351,6 +386,8 @@ export class SearchManager {
             this.events.onSshConnected?.(env.id)
           }
           const rootPath = await this.controlMaster.normalizePath(env, target.rootPath)
+          // Cancelled while connecting/resolving: never spawn an orphan search nobody can stop
+          if (this.isCancelled(req.searchId)) return
           await this.searchSingleEnv(env, rootPath, req, procs, pushMatches)
         } catch (err: any) {
           errors.push({ envId: target.envId, message: err?.message || String(err) })
@@ -446,7 +483,7 @@ export class SearchManager {
     if (!req.isCaseSensitive) grepFlags.push('-i')
     if (req.wholeWord) grepFlags.push('-w')
 
-    const remoteScript = `${REMOTE_PATH_EXPORT} if [ ! -d ${shellQuote(rootPath)} ]; then echo "Directory not found: ${rootPath}" >&2; exit 2; fi; if command -v rg >/dev/null 2>&1; then printf '__MODE__:rg\\n'; rg ${rgArgs}; else printf '__MODE__:grep\\n'; grep ${grepFlags.join(' ')} -- ${shellQuote(req.query)} ${shellQuote(rootPath)} | head -n 1500; fi`
+    const remoteScript = `${REMOTE_PATH_EXPORT} if [ ! -d ${shellQuote(rootPath)} ]; then echo "Directory not found: "${shellQuote(rootPath)} >&2; exit 2; fi; if command -v rg >/dev/null 2>&1; then printf '__MODE__:rg\\n'; rg ${rgArgs}; else printf '__MODE__:grep\\n'; grep ${grepFlags.join(' ')} -- ${shellQuote(req.query)} ${shellQuote(rootPath)} | head -n 1500; fi`
 
     await new Promise<void>((resolve, reject) => {
       const child = this.controlMaster.spawnRemoteCommand(env, remoteScript)
@@ -621,6 +658,7 @@ export class SearchManager {
     }
 
     const rootPath = await this.controlMaster.normalizePath(env, rawRootPath)
+    if (requestId && this.isCancelled(requestId)) return []
     const cleanRoot = rootPath.replace(/\/+$/, '')
     const tokens = splitFileQueryTokens(query)
     const procSet = new Set<ChildProcess>()
@@ -660,23 +698,23 @@ export class SearchManager {
 
     try {
       const lines = await new Promise<string[]>((resolve) => {
-        const child =
-          env.kind === 'local'
-            ? spawn('/bin/zsh', ['-c', fullScript], { stdio: ['ignore', 'pipe', 'ignore'] })
-            : this.controlMaster.spawnRemoteCommand(env, fullScript)
+        let child: ChildProcess
+        if (env.kind === 'local') {
+          // Own process group so cancel/timeout kills rg/find too, not just the `zsh -c` wrapper
+          child = spawn('/bin/zsh', ['-c', fullScript], { stdio: ['ignore', 'pipe', 'ignore'], detached: true })
+          ;(child as any).__mideGroup = true
+        } else {
+          child = this.controlMaster.spawnRemoteCommand(env, fullScript)
+        }
 
         procSet.add(child)
         let stdout = ''
         const timer = setTimeout(() => {
-          try {
-            child.kill('SIGTERM')
-          } catch {
-            // ignore
-          }
+          this.killProc(child)
           resolve(stdout.split('\n'))
         }, 8000)
 
-        child.stdout.on('data', (chunk: Buffer) => {
+        child.stdout?.on('data', (chunk: Buffer) => {
           if (stdout.length < 2 * 1024 * 1024) {
             stdout += chunk.toString('utf8')
           }

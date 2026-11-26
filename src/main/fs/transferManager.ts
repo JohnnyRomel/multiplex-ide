@@ -1,6 +1,8 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import type { Readable } from 'stream'
+import { pipeline } from 'stream/promises'
 import type { Environment, TransferDirection, TransferRequest, TransferTask } from '@shared/types'
 import type { UnifiedVfs } from './vfs'
 
@@ -14,6 +16,13 @@ interface TransferItemPlan {
   targetPath: string
   size: number
   isDirectory: boolean
+  mode?: number
+}
+
+/** Owner-executable source files stay executable on the target; everything else lands as 0644. */
+function modeFromPermissions(perms?: string): number | undefined {
+  if (!perms || perms.length < 3) return undefined
+  return perms[2] === 'x' ? 0o755 : 0o644
 }
 
 export class TransferManager {
@@ -123,20 +132,30 @@ export class TransferManager {
     sourceEnv: Environment,
     sourcePath: string,
     targetPath: string,
-    ctrl: ActiveController
+    ctrl: ActiveController,
+    budget?: { maxBytes: number; used: number },
+    depth = 0
   ): Promise<TransferItemPlan[]> {
     if (ctrl.cancelled) return []
+    if (depth > 64) throw new Error(`Directory nesting too deep (symlink loop?) at ${sourcePath}`)
     const st = await this.vfs.stat(sourceEnv, sourcePath)
     if (!st.isDirectory) {
-      return [{ sourcePath, targetPath, size: st.size, isDirectory: false }]
+      if (budget) {
+        budget.used += st.size
+        if (budget.used > budget.maxBytes) throw new Error('SIZE_BUDGET_EXCEEDED')
+      }
+      return [{ sourcePath, targetPath, size: st.size, isDirectory: false, mode: modeFromPermissions(st.permissions) }]
     }
+    // Never recurse through a symlinked directory (ancestor loops / pnpm trees would explode)
+    if (st.isSymlink && depth > 0) return []
 
     const plan: TransferItemPlan[] = [{ sourcePath, targetPath, size: 0, isDirectory: true }]
     const entries = await this.vfs.readDir(sourceEnv, sourcePath)
     for (const child of entries) {
       if (ctrl.cancelled) break
+      if (child.isSymlink && child.isDirectory) continue
       const childTarget = path.posix.join(targetPath, child.name)
-      const sub = await this.collectPlan(sourceEnv, child.path, childTarget, ctrl)
+      const sub = await this.collectPlan(sourceEnv, child.path, childTarget, ctrl, budget, depth + 1)
       plan.push(...sub)
     }
     return plan
@@ -181,16 +200,24 @@ export class TransferManager {
       // Stream each file directly from source VFS to target VFS (constant memory!)
       for (const item of fileItems) {
         if (ctrl.cancelled) return
-        await this.pipeSingleFile(sourceEnv, item.sourcePath, targetEnv, item.targetPath, ctrl, (chunkBytes) => {
-          task.bytesTransferred += chunkBytes
-          const now = Date.now()
-          if (now - lastEmit >= 120) {
-            const elapsedSec = Math.max(0.05, (now - startedAt) / 1000)
-            task.speedBps = Math.round(task.bytesTransferred / elapsedSec)
-            lastEmit = now
-            this.emit(task)
-          }
-        })
+        await this.pipeSingleFile(
+          sourceEnv,
+          item.sourcePath,
+          targetEnv,
+          item.targetPath,
+          ctrl,
+          (chunkBytes) => {
+            task.bytesTransferred += chunkBytes
+            const now = Date.now()
+            if (now - lastEmit >= 120) {
+              const elapsedSec = Math.max(0.05, (now - startedAt) / 1000)
+              task.speedBps = Math.round(task.bytesTransferred / elapsedSec)
+              lastEmit = now
+              this.emit(task)
+            }
+          },
+          item.mode
+        )
         task.filesCompleted++
         this.emit(task)
       }
@@ -216,43 +243,41 @@ export class TransferManager {
     targetEnv: Environment,
     targetPath: string,
     ctrl: ActiveController,
-    onProgress: (bytes: number) => void
+    onProgress: (bytes: number) => void,
+    newFileMode?: number
   ): Promise<void> {
-    const readStream = await this.vfs.createReadStream(sourceEnv, sourcePath)
-    const writeStream = await this.vfs.createWriteStream(targetEnv, targetPath)
+    if (ctrl.cancelled) throw new Error('Transfer cancelled')
 
-    return new Promise((resolve, reject) => {
-      let settled = false
-      const done = (err?: Error) => {
-        if (settled) return
-        settled = true
-        ctrl.abort = undefined
-        if (err) reject(err)
-        else resolve()
-      }
+    // Create the (possibly slow, remote mkdir + open) write stream FIRST, then the read stream, and attach
+    // listeners in the same tick: a local read stream that fails to open (EACCES) must never emit an
+    // unhandled 'error' (main-process crash dialog) while we're still awaiting the remote side.
+    const writeStream = await this.vfs.createWriteStream(targetEnv, targetPath, newFileMode)
+    let readStream: Readable
+    try {
+      if (ctrl.cancelled) throw new Error('Transfer cancelled')
+      readStream = await this.vfs.createReadStream(sourceEnv, sourcePath)
+    } catch (err) {
+      writeStream.destroy()
+      throw err
+    }
 
-      ctrl.abort = () => {
-        readStream.destroy()
-        writeStream.destroy()
-        done(new Error('Transfer cancelled'))
-      }
-
-      readStream.on('data', (chunk: Buffer | string) => {
-        onProgress(Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk))
-      })
-      readStream.on('error', (err) => {
-        writeStream.destroy()
-        done(err)
-      })
-      writeStream.on('error', (err) => {
-        readStream.destroy()
-        done(err)
-      })
-      writeStream.on('finish', () => done())
-      writeStream.on('close', () => done())
-
-      readStream.pipe(writeStream)
+    readStream.on('data', (chunk: Buffer | string) => {
+      onProgress(Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk))
     })
+
+    ctrl.abort = () => {
+      const err = new Error('Transfer cancelled')
+      readStream.destroy(err)
+      writeStream.destroy(err)
+    }
+    try {
+      if (ctrl.cancelled) throw new Error('Transfer cancelled')
+      await pipeline(readStream, writeStream)
+    } finally {
+      ctrl.abort = undefined
+      if (!readStream.destroyed) readStream.destroy()
+      if (!writeStream.destroyed && !writeStream.writableFinished) writeStream.destroy()
+    }
   }
 
   /**
@@ -270,15 +295,31 @@ export class TransferManager {
     }
 
     const stageDir = path.join(os.tmpdir(), 'multiplex-ide-drag', Date.now().toString(36))
-    fs.mkdirSync(stageDir, { recursive: true })
     const localTarget = path.join(stageDir, st.name)
 
     const ctrl: ActiveController = { cancelled: false }
-    const plan = await this.collectPlan(env, normPath, localTarget, ctrl)
-    const totalBytes = plan.reduce((s, p) => s + p.size, 0)
-    if (totalBytes > MAX_DRAG_STAGE_BYTES) {
-      throw new Error('Folder exceeds 50 MB drag-staging limit; use right-click "Download to..." or Dual-Explorer drag.')
+    let plan: TransferItemPlan[]
+    try {
+      // Stop walking as soon as the size budget is exceeded (never hang on a huge remote folder)
+      plan = await this.collectPlan(env, normPath, localTarget, ctrl, { maxBytes: MAX_DRAG_STAGE_BYTES, used: 0 })
+    } catch (err: any) {
+      if (err?.message === 'SIZE_BUDGET_EXCEEDED') {
+        throw new Error('Folder exceeds 50 MB drag-staging limit; use right-click "Download to..." or Dual-Explorer drag.')
+      }
+      throw err
     }
+
+    // Clean up stale staging dirs from previous drags (older than 1 hour)
+    try {
+      const root = path.join(os.tmpdir(), 'multiplex-ide-drag')
+      for (const name of fs.existsSync(root) ? fs.readdirSync(root) : []) {
+        const p = path.join(root, name)
+        if (Date.now() - fs.statSync(p).mtimeMs > 3600_000) fs.rmSync(p, { recursive: true, force: true })
+      }
+    } catch {
+      // ignore cleanup errors
+    }
+    fs.mkdirSync(stageDir, { recursive: true })
 
     for (const dir of plan.filter((p) => p.isDirectory)) {
       fs.mkdirSync(dir.targetPath, { recursive: true })

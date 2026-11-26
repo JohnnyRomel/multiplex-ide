@@ -10,6 +10,10 @@ import { bindSublimeKeybindings, getMonacoThemeName, initMonacoSublime } from '.
 
 initMonacoSublime()
 
+function tabModelUri(envId: string, filePath: string): monaco.Uri {
+  return monaco.Uri.parse(`multiplex://${encodeURIComponent(envId)}/${encodeURI(filePath)}`)
+}
+
 interface MonacoPaneProps {
   tab: EditorTab | null
   group: 0 | 1
@@ -21,6 +25,27 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
   const diffEditorRef = useRef<monaco.editor.IStandaloneDiffEditor | null>(null)
   const activeTabRef = useRef<EditorTab | null>(tab)
   activeTabRef.current = tab
+
+  // Dispose Monaco models of closed tabs (8 MB files would otherwise leak forever). Pane 0 owns this.
+  const openTabKeys = useAppStore((s) =>
+    s.tabs
+      .filter((t) => !t.isDiff)
+      .map((t) => tabModelUri(t.envId, t.path).toString())
+      .join('\n')
+  )
+  useEffect(() => {
+    if (group !== 0) return
+    const timer = setTimeout(() => {
+      const live = new Set(openTabKeys ? openTabKeys.split('\n') : [])
+      const attached = new Set(monaco.editor.getEditors().map((e) => e.getModel()))
+      for (const model of monaco.editor.getModels()) {
+        if (model.uri.scheme !== 'multiplex') continue
+        if (live.has(model.uri.toString()) || attached.has(model)) continue
+        model.dispose()
+      }
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [openTabKeys, group])
 
   const theme = useAppStore((s) => s.theme)
   const editorFontSize = useAppStore((s) => s.editorFontSize)
@@ -121,8 +146,12 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
 
     const subChange = ed.onDidChangeModelContent(() => {
       const cur = activeTabRef.current
-      if (!cur || cur.loading || cur.isBinary) return
-      const val = ed.getValue()
+      if (!cur || cur.loading || cur.isBinary || cur.error || cur.isDiff) return
+      // Only accept edits from the model that actually belongs to the current tab (a stale model left
+      // attached to a hidden pane must never write file A's text into file B's tab!)
+      const model = ed.getModel()
+      if (!model || model.uri.toString() !== tabModelUri(cur.envId, cur.path).toString()) return
+      const val = model.getValue()
       if (val !== cur.content) {
         updateTabContent(cur.id, val)
       }
@@ -166,13 +195,24 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
   }, [editorFontSize])
 
   useEffect(() => {
-    if (!tab || tab.loading || tab.isBinary || tab.error) return
+    if (!tab || tab.loading || tab.isBinary || tab.error) {
+      // Detach any previous file's model so this (hidden) editor can't keep mutating another tab
+      if (editorRef.current?.getModel()) editorRef.current.setModel(null)
+      return
+    }
 
     if (isDiff && diffEditorRef.current && tab.diffOriginal) {
+      const diffEd = diffEditorRef.current
       const origModel = monaco.editor.createModel(tab.diffOriginal.content, tab.language)
       const modModel = monaco.editor.createModel(tab.content, tab.language)
-      diffEditorRef.current.setModel({ original: origModel, modified: modModel })
+      diffEd.setModel({ original: origModel, modified: modModel })
       return () => {
+        // Reset the widget BEFORE disposing its models (Monaco throws/logs otherwise)
+        try {
+          diffEd.setModel(null)
+        } catch {
+          // editor already disposed
+        }
         origModel.dispose()
         modModel.dispose()
       }
@@ -181,7 +221,7 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
     const ed = editorRef.current
     if (!ed) return
 
-    const uri = monaco.Uri.parse(`multiplex://${encodeURIComponent(tab.envId)}/${encodeURI(tab.path)}`)
+    const uri = tabModelUri(tab.envId, tab.path)
     let model = monaco.editor.getModel(uri)
     if (!model) {
       model = monaco.editor.createModel(tab.content, tab.language, uri)
@@ -197,6 +237,7 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
     if (ed.getModel() !== model) {
       ed.setModel(model)
     }
+    ed.updateOptions({ readOnly: Boolean(tab.readOnly) })
 
     const curPos = ed.getPosition()
     setCursorInfo({
@@ -212,7 +253,7 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
       ed.focus()
       clearPendingPosition(tab.id)
     }
-  }, [tab?.id, tab?.loading, tab?.isBinary, tab?.error, tab?.pendingPosition, isDiff])
+  }, [tab?.id, tab?.loading, tab?.isBinary, tab?.error, tab?.readOnly, tab?.pendingPosition, isDiff])
 
   const handleDropFile = (e: React.DragEvent) => {
     const raw = e.dataTransfer.getData('application/x-multiplex-entry')
@@ -247,6 +288,19 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
         ref={containerRef}
         className={`h-full w-full ${!tab || tab.loading || tab.isBinary || tab.error ? 'hidden' : 'block'}`}
       />
+
+      {tab && tab.readOnly && !tab.loading && !tab.error && !tab.isBinary && (
+        <div
+          className="pointer-events-none absolute right-4 top-2 z-10 rounded border px-2 py-0.5 text-[11px] font-mono"
+          style={{
+            backgroundColor: 'var(--st-panel)',
+            borderColor: 'var(--st-dirty)',
+            color: 'var(--st-dirty)'
+          }}
+        >
+          Read-only · {tab.encoding || 'non-UTF-8'} file (saving would corrupt it)
+        </div>
+      )}
 
       {!tab && (
         <div

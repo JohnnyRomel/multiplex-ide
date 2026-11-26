@@ -10,6 +10,8 @@ export interface SftpStats {
   size: number
   mtime: number // seconds
   mode: number
+  uid?: number
+  gid?: number
   isDirectory(): boolean
   isSymbolicLink(): boolean
   isFile(): boolean
@@ -118,14 +120,17 @@ export class OpenSshSftpPool {
   }
 
   private async withRetry<T>(env: Environment, op: (sftp: any) => Promise<T>): Promise<T> {
-    const hadCached = this.pool.has(env.id)
     try {
       const sftp = await this.getSession(env)
       return await op(sftp)
     } catch (err: any) {
+      // Ordinary SFTP status errors (no such file = 2, permission denied = 3, failure = 4) are normal
+      // results — never tear down the shared session (that would kill in-flight transfers/reads!).
+      const code = typeof err?.code === 'number' ? err.code : undefined
       const msg = String(err?.message || err)
-      const isChannelBroken = /closed|eof|reset|broken|disconnected|not connected|timed out/i.test(msg)
-      if (!hadCached && !isChannelBroken) throw err
+      const isChannelBroken =
+        code === undefined && /channel closed|eof|reset|broken pipe|disconnected|not connected|timed out|write after end/i.test(msg)
+      if (!isChannelBroken) throw err
       this.dispose(env.id)
       const masterRes = await this.controlMaster.ensureHealthyMaster(env).catch(() => ({ ok: false }))
       if (!masterRes.ok) throw err
@@ -253,6 +258,116 @@ export class OpenSshSftpPool {
     })
   }
 
+  /**
+   * Resolves the permission bits to apply when (re)writing `remotePath`. ssh2-streams' write stream
+   * defaults to mode 0o666 and ALWAYS fchmod()s after open (no umask), which used to turn every saved
+   * `deploy.sh` into a non-executable, world-writable file. Preserve the existing mode instead.
+   */
+  private async resolveWriteMode(env: Environment, remotePath: string, fallback?: number): Promise<number> {
+    try {
+      const st = await this.stat(env, remotePath)
+      return st.mode & 0o7777
+    } catch {
+      return fallback ?? 0o644
+    }
+  }
+
+  private async writeWithMode(env: Environment, remotePath: string, data: Buffer, mode: number): Promise<void> {
+    const sftp = await this.getSession(env)
+    const stream: Writable = sftp.createWriteStream(remotePath, { highWaterMark: 64 * 1024, mode })
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const finish = (err?: Error) => {
+        if (settled) return
+        settled = true
+        if (err) reject(err)
+        else resolve()
+      }
+      stream.on('error', (err) => finish(err))
+      stream.on('close', () => finish())
+      stream.on('finish', () => finish())
+      stream.end(data)
+    })
+  }
+
+  private async unlinkQuiet(env: Environment, remotePath: string): Promise<void> {
+    try {
+      await this.unlink(env, remotePath)
+    } catch {
+      // ignore
+    }
+  }
+
+  private async posixRename(env: Environment, oldPath: string, newPath: string): Promise<void> {
+    const sftp = await this.getSession(env)
+    await new Promise<void>((resolve, reject) => {
+      sftp.ext_openssh_rename(oldPath, newPath, (err: Error | null) => (err ? reject(err) : resolve()))
+    })
+  }
+
+  /**
+   * Crash-safe save: writes `<dir>/.<name>.mide-<rand>.tmp` with the original permission bits, verifies its
+   * size, then atomically replaces the original via `posix-rename@openssh.com`. If the connection drops
+   * mid-save the original file is untouched. Falls back to the classic in-place write when atomic replace
+   * would change semantics or isn't possible: symlinks (keep the link), files owned by another user/group
+   * (rename would steal ownership), unwritable directories, or servers without the rename extension.
+   */
+  async atomicWriteFileBuffer(env: Environment, remotePath: string, data: Buffer): Promise<void> {
+    let st: SftpStats | null = null
+    try {
+      st = await this.lstat(env, remotePath)
+    } catch {
+      st = null // new file
+    }
+    if (st && (st.isSymbolicLink() || !st.isFile())) {
+      return this.writeFileBuffer(env, remotePath, data)
+    }
+
+    const dir = path.posix.dirname(remotePath)
+    const base = path.posix.basename(remotePath)
+    const tmp = path.posix.join(dir, `.${base}.mide-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.tmp`)
+    const mode = st ? st.mode & 0o7777 : 0o644
+
+    try {
+      await this.writeWithMode(env, tmp, data, mode)
+    } catch {
+      // e.g. directory not writable by us (but the file is): fall back to in-place write
+      await this.unlinkQuiet(env, tmp)
+      return this.writeFileBuffer(env, remotePath, data)
+    }
+
+    let tmpSt: SftpStats
+    try {
+      tmpSt = await this.stat(env, tmp)
+    } catch (err) {
+      await this.unlinkQuiet(env, tmp)
+      throw err
+    }
+    if (tmpSt.size !== data.length) {
+      await this.unlinkQuiet(env, tmp)
+      throw new Error(`Save aborted: temp file is ${tmpSt.size} bytes, expected ${data.length} (original left untouched)`)
+    }
+    const ownershipDiffers =
+      st !== null &&
+      st.uid !== undefined &&
+      tmpSt.uid !== undefined &&
+      (st.uid !== tmpSt.uid || st.gid !== tmpSt.gid)
+    if (ownershipDiffers) {
+      await this.unlinkQuiet(env, tmp)
+      return this.writeFileBuffer(env, remotePath, data)
+    }
+
+    try {
+      await this.posixRename(env, tmp, remotePath)
+    } catch (err: any) {
+      await this.unlinkQuiet(env, tmp)
+      if (/not support|unsupported|extension/i.test(String(err?.message || err))) {
+        return this.writeFileBuffer(env, remotePath, data)
+      }
+      throw err
+    }
+  }
+
   async mkdir(env: Environment, remoteDir: string): Promise<void> {
     const sftp = await this.getSession(env)
     return new Promise((resolve, reject) => {
@@ -337,8 +452,9 @@ export class OpenSshSftpPool {
     return sftp.createReadStream(remotePath, { highWaterMark: 64 * 1024 })
   }
 
-  async createWriteStream(env: Environment, remotePath: string): Promise<Writable> {
+  async createWriteStream(env: Environment, remotePath: string, newFileMode?: number): Promise<Writable> {
+    const mode = await this.resolveWriteMode(env, remotePath, newFileMode)
     const sftp = await this.getSession(env)
-    return sftp.createWriteStream(remotePath, { highWaterMark: 64 * 1024 })
+    return sftp.createWriteStream(remotePath, { highWaterMark: 64 * 1024, mode })
   }
 }

@@ -1,8 +1,9 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Allotment } from 'allotment'
 import { Columns2, Maximize2, Minimize2, Plus, RotateCw, Rows2, Terminal, X } from 'lucide-react'
 import { collectEnvTerminalIds, collectTerminalIds, type TerminalSplitNode, useAppStore } from '@renderer/stores/useAppStore'
 import { TerminalInstance } from './TerminalInstance'
+import { pruneXterms } from './xtermRegistry'
 
 const RecursiveSplit: React.FC<{
   envId: string
@@ -52,6 +53,19 @@ export const TerminalWorkspaceArea: React.FC = () => {
 
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState('')
+
+  // Dispose persistent xterm instances only once their terminal is gone from every tab/env.
+  // (Deferred a tick so an unmount/remount during a split re-parents instead of disposing.)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const live = new Set<string>()
+      for (const tabs of Object.values(useAppStore.getState().terminalTabsByEnv)) {
+        for (const id of collectEnvTerminalIds(tabs)) live.add(id)
+      }
+      pruneXterms(live)
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [terminalTabsByEnv])
 
   const activeEnv = environments.find((e) => e.id === activeEnvId)
   const activeEnvTabs = terminalTabsByEnv[activeEnvId] || []

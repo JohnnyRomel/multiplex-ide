@@ -1,19 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Terminal as XTerm } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
-import { SearchAddon } from '@xterm/addon-search'
-import { WebLinksAddon } from '@xterm/addon-web-links'
+import type { Terminal as XTerm } from '@xterm/xterm'
+import type { FitAddon } from '@xterm/addon-fit'
+import type { SearchAddon } from '@xterm/addon-search'
 import { Check, ChevronDown, Columns2, Plus, RefreshCw, RotateCw, Rows2, Search, Trash2, WifiOff, X } from 'lucide-react'
-import { TerminalFrameBuffer } from '@shared/terminalFrameBuffer'
 import type { EditorThemeId, RecoverableTmuxSession } from '@shared/types'
 import { useAppStore } from '@renderer/stores/useAppStore'
-import {
-  decodeOsc52Payload,
-  registerTerminalInstance,
-  unregisterTerminalInstance
-} from '@renderer/utils/clipboardBridge'
+import { attachXterm, detachXterm, fitXterm, getOrCreateXterm, getXterm } from './xtermRegistry'
 
-function getXtermTheme(theme: EditorThemeId) {
+export function getXtermTheme(theme: EditorThemeId) {
   if (theme === 'mariana') {
     return {
       background: '#272e36',
@@ -107,7 +101,6 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
   const xtermRef = useRef<XTerm | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchRef = useRef<SearchAddon | null>(null)
-  const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null)
 
   const theme = useAppStore((s) => s.theme)
   const terminalFontSize = useAppStore((s) => s.terminalFontSize)
@@ -151,77 +144,20 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     if (!el) return
 
     const initState = useAppStore.getState()
-    const term = new XTerm({
-      fontFamily: 'Menlo, "SF Mono", "JetBrains Mono", Monaco, monospace',
+    const entry = getOrCreateXterm(terminalId, {
       fontSize: initState.terminalFontSize,
-      lineHeight: 1.25,
-      cursorBlink: true,
-      cursorStyle: 'block',
-      macOptionIsMeta: true,
-      macOptionClickForcesSelection: true,
-      scrollback: 15000,
       theme: getXtermTheme(initState.theme)
     })
+    entry.handlers.onToggleFind = () => setShowFind((v) => !v)
+    attachXterm(entry, el)
 
-    const fitAddon = new FitAddon()
-    const searchAddon = new SearchAddon()
-    const webLinksAddon = new WebLinksAddon()
+    xtermRef.current = entry.term
+    fitRef.current = entry.fit
+    searchRef.current = entry.search
 
-    term.loadAddon(fitAddon)
-    term.loadAddon(searchAddon)
-    term.loadAddon(webLinksAddon)
-    // Intentionally use xterm.js's built-in DOM renderer (no WebglAddon) on macOS:
-    // avoids ANGLE/Metal WebGL glyph texture atlas corruption (missing/garbled glyphs)
-    // across hidden multi-tab terminals, sleep/wake, and 4K Retina DPR scaling.
-    term.open(el)
-
-    xtermRef.current = term
-    fitRef.current = fitAddon
-    searchRef.current = searchAddon
-    lastSentSizeRef.current = null
-    registerTerminalInstance(terminalId, term)
-
-    // Support OSC 52 so copying inside remote tmux / vim / neovim syncs straight to macOS clipboard!
-    const osc52Disposable = term.parser.registerOscHandler(52, (data) => {
-      const decoded = decodeOsc52Payload(data)
-      if (decoded !== null) {
-        window.multiplex.writeClipboardText(decoded)
-      }
-      return true
-    })
-
-    const doFit = () => {
-      if (!el.offsetWidth || !el.offsetHeight) return
-      try {
-        fitAddon.fit()
-        const prev = lastSentSizeRef.current
-        if (!prev || prev.cols !== term.cols || prev.rows !== term.rows) {
-          lastSentSizeRef.current = { cols: term.cols, rows: term.rows }
-          window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
-        }
-      } catch {
-        // ignore layout race
-      }
-    }
-
+    const doFit = () => fitXterm(entry)
     requestAnimationFrame(doFit)
     const settleFitTimer = setTimeout(doFit, 90)
-
-    const onDataDisposable = term.onData((data) => {
-      window.multiplex.writeTerminal(terminalId, data)
-    })
-
-    // Coalesce fragmented SSH packets + DEC 2026 / cursor-hide redraw cycles into atomic VSync writes
-    // so TUI apps (`agy`, vim, tmux 2.8) never flash half-erased frames or jumping cursors!
-    const frameBuffer = new TerminalFrameBuffer((batch) => {
-      term.write(batch)
-    })
-
-    const offIpcData = window.multiplex.onTerminalData((id, data) => {
-      if (id === terminalId) {
-        frameBuffer.push(data)
-      }
-    })
 
     let resizeRaf: number | null = null
     const observer = new ResizeObserver(() => {
@@ -233,71 +169,17 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     })
     observer.observe(el)
 
-    // Pass app-level Cmd shortcuts through cleanly + support Ctrl+Shift+C / Ctrl+Shift+V
-    term.attachCustomKeyEventHandler((ev) => {
-      if (ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey) {
-        const k = ev.key.toLowerCase()
-        if (k === 'c') {
-          if (term.hasSelection()) {
-            window.multiplex.writeClipboardText(term.getSelection())
-          }
-          return false
-        }
-        if (k === 'v') {
-          const text = window.multiplex.readClipboardText()
-          if (text) term.paste(text)
-          return false
-        }
-      }
-      if (ev.type === 'keydown' && ev.metaKey) {
-        const k = ev.key.toLowerCase()
-        if (!ev.shiftKey && !ev.altKey && k === 'f') {
-          setShowFind((v) => !v)
-          return false
-        }
-        if (!ev.shiftKey && !ev.altKey && k === 'k') {
-          term.clear()
-          return false
-        }
-        if (
-          k === 'c' ||
-          k === 'v' ||
-          k === 'x' ||
-          k === 'a' ||
-          k === 'p' ||
-          k === 't' ||
-          k === 'w' ||
-          (ev.shiftKey && k === 'f') ||
-          k === 'b' ||
-          k === 'j' ||
-          k === ',' ||
-          k === 's' ||
-          k === '=' ||
-          k === '+' ||
-          k === '-' ||
-          k === '0' ||
-          k === '[' ||
-          k === ']' ||
-          ev.code === 'Backslash' ||
-          (k >= '1' && k <= '9')
-        ) {
-          return false
-        }
-      }
-      return true
-    })
-
     return () => {
       clearTimeout(settleFitTimer)
       if (resizeRaf !== null) cancelAnimationFrame(resizeRaf)
-      frameBuffer.dispose()
-      unregisterTerminalInstance(terminalId, term)
-      osc52Disposable.dispose()
       observer.disconnect()
-      onDataDisposable.dispose()
-      offIpcData()
-      term.dispose()
+      if (entry.handlers.onToggleFind) entry.handlers.onToggleFind = undefined
+      // Detach only — the xterm (and its scrollback) survives split/unsplit remounts.
+      // It is disposed by TerminalWorkspaceArea once the terminal leaves the store.
+      detachXterm(entry, el)
       xtermRef.current = null
+      fitRef.current = null
+      searchRef.current = null
     }
   }, [terminalId])
 
@@ -310,43 +192,19 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
 
   // Live font size sync (refit PTY rows/cols only when dimensions actually change!)
   useEffect(() => {
-    const term = xtermRef.current
-    const fit = fitRef.current
-    if (!term || !fit) return
-    term.options.fontSize = terminalFontSize
+    const entry = getXterm(terminalId)
+    if (!entry) return
+    entry.term.options.fontSize = terminalFontSize
     if (isVisible) {
-      requestAnimationFrame(() => {
-        try {
-          fit.fit()
-          const prev = lastSentSizeRef.current
-          if (!prev || prev.cols !== term.cols || prev.rows !== term.rows) {
-            lastSentSizeRef.current = { cols: term.cols, rows: term.rows }
-            window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
-          }
-        } catch {
-          // ignore
-        }
-      })
+      requestAnimationFrame(() => fitXterm(entry))
     }
   }, [terminalFontSize, isVisible, terminalId])
 
   // Refit ONLY when becoming visible (never trigger redundant SIGWINCH on focus clicks!)
   useEffect(() => {
-    if (isVisible && fitRef.current && xtermRef.current) {
-      const syncFit = () => {
-        try {
-          const term = xtermRef.current
-          if (!term) return
-          fitRef.current?.fit()
-          const prev = lastSentSizeRef.current
-          if (!prev || prev.cols !== term.cols || prev.rows !== term.rows) {
-            lastSentSizeRef.current = { cols: term.cols, rows: term.rows }
-            window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
-          }
-        } catch {
-          // ignore
-        }
-      }
+    const entry = getXterm(terminalId)
+    if (isVisible && entry) {
+      const syncFit = () => fitXterm(entry)
       requestAnimationFrame(syncFit)
       const timer = setTimeout(syncFit, 80)
       return () => clearTimeout(timer)
@@ -355,20 +213,12 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
 
   // Refit cleanly after SSH transitions to connected or switches tmux sessions so remote cols/rows always match
   useEffect(() => {
-    if (connState === 'connected' && fitRef.current && xtermRef.current) {
-      const timer = setTimeout(() => {
-        try {
-          const term = xtermRef.current
-          if (!term) return
-          fitRef.current?.fit()
-          lastSentSizeRef.current = { cols: term.cols, rows: term.rows }
-          window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
-        } catch {
-          // ignore
-        }
-      }, 120)
-      return () => clearTimeout(timer)
-    }
+    if (connState !== 'connected') return
+    const timer = setTimeout(() => {
+      const entry = getXterm(terminalId)
+      if (entry) fitXterm(entry, true)
+    }, 120)
+    return () => clearTimeout(timer)
   }, [connState, termStatus?.tmuxSession, terminalId])
 
   // Close tmux session popover on outside click or Escape

@@ -13,6 +13,15 @@ import { registerIpcHandlers } from './ipc/registerHandlers'
 // Set application name BEFORE app.whenReady() so macOS Menu Bar & Dock display "MultiplexIDE" immediately
 app.setName('MultiplexIDE')
 
+// Never let a stray stream/socket error pop Electron's blocking "JavaScript error in main process" dialog
+// or silently kill background work; log it instead.
+process.on('uncaughtException', (err) => {
+  console.error('[MultiplexIDE] Uncaught exception in main process:', err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[MultiplexIDE] Unhandled promise rejection in main process:', reason)
+})
+
 let mainWindow: BrowserWindow | null = null
 let registry: EnvironmentRegistry
 let controlMaster: SshControlMaster
@@ -81,8 +90,26 @@ function createWindow(): void {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
   }
 
+  // When the renderer reloads (menu reload, dev HMR full reload) or crashes, every xterm & tab is
+  // gone but main-process PTYs would keep running invisibly — leaking macOS PTYs (~511 system-wide)
+  // and keeping remote tmux sessions "owned" so they can't be restored. Detach them all (remote tmux
+  // sessions survive and are re-attached by the fresh renderer).
+  let rendererLoadedOnce = false
+  mainWindow.webContents.on('did-finish-load', () => {
+    rendererLoadedOnce = true
+  })
+  mainWindow.webContents.on('did-start-loading', () => {
+    if (rendererLoadedOnce) terminalManager?.killAll()
+  })
+  mainWindow.webContents.on('render-process-gone', () => {
+    terminalManager?.killAll()
+  })
+
   mainWindow.on('closed', () => {
     mainWindow = null
+    // macOS keeps the app alive after the last window closes; don't leave orphan PTYs behind
+    terminalManager?.killAll()
+    vfs?.disposeAll()
   })
 }
 
@@ -131,8 +158,17 @@ function buildMacMenu(): void {
     {
       label: 'View',
       submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
+        // NOT bound to ⌘R: that is far too easy to hit while working in a terminal and would wipe every tab
+        {
+          label: 'Reload Window',
+          accelerator: 'Alt+CmdOrCtrl+R',
+          click: () => (BrowserWindow.getFocusedWindow() ?? mainWindow)?.webContents.reload()
+        },
+        {
+          label: 'Force Reload Window',
+          accelerator: 'Alt+Shift+CmdOrCtrl+R',
+          click: () => (BrowserWindow.getFocusedWindow() ?? mainWindow)?.webContents.reloadIgnoringCache()
+        },
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: 'togglefullscreen' }

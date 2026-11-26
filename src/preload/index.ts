@@ -114,6 +114,9 @@ const api = {
   writeTerminal: (terminalId: string, data: string): void => {
     ipcRenderer.send(IPC.TERM_WRITE, terminalId, data)
   },
+  notifyTerminalReady: (terminalId: string): void => {
+    ipcRenderer.send(IPC.TERM_READY, terminalId)
+  },
   resizeTerminal: (terminalId: string, cols: number, rows: number): void => {
     ipcRenderer.send(IPC.TERM_RESIZE, terminalId, cols, rows)
   },

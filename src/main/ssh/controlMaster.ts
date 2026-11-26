@@ -73,20 +73,45 @@ export function parseControlMasterPid(output: string): number | null {
   return Number.isFinite(pid) && pid > 1 ? pid : null
 }
 
+/**
+ * Detects sshd refusing a NEW channel on an otherwise healthy multiplexed connection — typically
+ * `MaxSessions` (default 10) exhausted by many tabs + SFTP + probes. The transport is alive, so this
+ * must NEVER be treated as a dead master (tearing it down would drop every open pane!).
+ */
+export function isChannelLimitError(text: string): boolean {
+  return /administratively prohibited|session open refused|open failed: (?:administratively|resource)|no more sessions|too many sessions/i.test(
+    text || ''
+  )
+}
+
+function isSafePrivateDir(dir: string): boolean {
+  try {
+    const st = fs.lstatSync(dir)
+    const uid = process.getuid?.()
+    if (!st.isDirectory() || st.isSymbolicLink()) return false
+    if (uid !== undefined && st.uid !== uid) return false
+    return (st.mode & 0o077) === 0
+  } catch {
+    return false
+  }
+}
+
 function resolveShortControlDir(baseDir?: string): string {
   if (baseDir) return baseDir
   const uid = process.getuid?.() ?? 'u'
   // Prefer `/tmp/mide-ssh-<uid>` (~17 bytes) over macOS `os.tmpdir()` (`/var/folders/.../T`, ~49 bytes)
   // because macOS Unix domain socket paths cap at 104 bytes AND OpenSSH appends a 17-byte temp suffix!
+  // Only used if it is a real directory owned by us with no group/other access (shared /tmp safety).
   const preferred = `/tmp/mide-ssh-${uid}`
   try {
     fs.mkdirSync(preferred, { recursive: true, mode: 0o700 })
-    return preferred
+    if (isSafePrivateDir(preferred)) return preferred
   } catch {
-    const fallback = path.join(os.tmpdir(), `mide-ssh-${uid}`)
-    fs.mkdirSync(fallback, { recursive: true, mode: 0o700 })
-    return fallback
+    // fall through
   }
+  const fallback = path.join(os.tmpdir(), `mide-ssh-${uid}`)
+  fs.mkdirSync(fallback, { recursive: true, mode: 0o700 })
+  return fallback
 }
 
 export class SshControlMaster {
@@ -131,11 +156,18 @@ export class SshControlMaster {
       args.push('-o', 'ConnectTimeout=20')
     }
 
+    if (opts?.reuseOnly) {
+      // Strict mux-only: `ControlMaster=no` alone silently FALLS BACK to a brand-new direct connection
+      // when the socket is dead. Forcing ProxyCommand to /usr/bin/false makes that fallback fail in
+      // ~40ms instead of dialing VPN/bastion/ProxyCommand from background probes & git polling.
+      args.push('-o', 'ProxyCommand=/usr/bin/false')
+    }
+
     if (env.source !== 'ssh-config') {
       if (env.port && env.port !== 22) {
         args.push('-p', String(env.port))
       }
-      if (env.proxyJump) {
+      if (env.proxyJump && !opts?.reuseOnly) {
         args.push('-J', env.proxyJump)
       }
       if (env.identityFile) {
@@ -212,7 +244,9 @@ export class SshControlMaster {
           batchMode: true,
           reuseOnly: true
         })
-        return res.code === 0 && res.stdout.includes('__MIDE_ALIVE__')
+        if (res.code === 0 && res.stdout.includes('__MIDE_ALIVE__')) return true
+        // sshd refused a new channel (MaxSessions) => transport is alive, just saturated
+        return isChannelLimitError(res.stderr)
       } catch {
         return false
       }
@@ -308,46 +342,39 @@ export class SshControlMaster {
 
   /**
    * Ensures a leftover dead or half-open wedged socket never poisons subsequent SSH sessions.
+   * If a fresh master is currently being dialed, waits for it instead of tearing it down mid-handshake.
    */
   async cleanIfDeadSocket(env: Environment): Promise<void> {
     if (env.kind === 'local') return
+    const inFlight = this.connectLocks.get(env.id)
+    if (inFlight) {
+      await inFlight.catch(() => undefined)
+      return
+    }
     const ctlPath = this.getControlPath(env)
     if (!fs.existsSync(ctlPath)) return
     const healthy = await this.verifyEndToEnd(env, 4000)
-    if (!healthy) {
+    if (!healthy && !this.connectLocks.has(env.id)) {
       await this.resetControlSocket(env, { force: true })
     }
   }
 
   /**
-   * Coordinates ONE healthy end-to-end ControlMaster per environment across all panes & SFTP:
-   * - If a sibling pane ALREADY connected a fresh master within `allowReuseRecentMs` (e.g. 6000ms
-   *   during multi-tab auto-reconnect) and `verifyEndToEnd()` succeeds, reuses it immediately so a
-   *   lagging sibling tab NEVER tears down a brand-new master!
-   * - If `forceReset` is true otherwise, tears down any wedged master first and dials ONE fresh connection.
-   * - Otherwise, reuses an existing master ONLY if end-to-end `verifyEndToEnd()` succeeds; if wedged,
-   *   automatically tears it down and dials ONE fresh connection (shared across all waiting panes!).
+   * Coordinates ONE healthy end-to-end ControlMaster per environment across all panes & SFTP.
+   * Reuses the existing master whenever end-to-end verification succeeds (a single failing pane must
+   * never tear down a master that siblings are actively using); only a genuinely dead/wedged master is
+   * replaced, and concurrent callers share the single in-flight dial.
    */
-  async ensureHealthyMaster(
-    env: Environment,
-    opts?: { forceReset?: boolean; allowReuseRecentMs?: number }
-  ): Promise<SshConnectResult> {
+  async ensureHealthyMaster(env: Environment): Promise<SshConnectResult> {
     if (env.kind === 'local') return { ok: true }
 
-    // If a connect attempt is already in progress for this env, join it rather than piling on!
     const inFlight = this.connectLocks.get(env.id)
     if (inFlight) {
       return inFlight
     }
 
-    const recentOk =
-      opts?.allowReuseRecentMs !== undefined &&
-      Date.now() - (this.lastConnectedAt.get(env.id) || 0) < opts.allowReuseRecentMs
-
-    if (!opts?.forceReset || recentOk) {
-      if (await this.verifyEndToEnd(env, 4500)) {
-        return { ok: true }
-      }
+    if (await this.verifyEndToEnd(env, 4500)) {
+      return { ok: true }
     }
 
     return this.connect(env, { forceReset: true })

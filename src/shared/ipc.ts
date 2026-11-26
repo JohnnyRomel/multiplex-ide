@@ -19,6 +19,7 @@ export const IPC = {
   // Terminal
   TERM_CREATE: 'term:create',
   TERM_WRITE: 'term:write',
+  TERM_READY: 'term:ready',
   TERM_RESIZE: 'term:resize',
   TERM_KILL: 'term:kill',
   TERM_RECONNECT: 'term:reconnect',

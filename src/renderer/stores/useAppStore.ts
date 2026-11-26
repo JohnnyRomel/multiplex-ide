@@ -36,6 +36,9 @@ export interface EditorTab {
   isBinary: boolean
   loading: boolean
   error?: string
+  /** Set for non-UTF-8 files: shown decoded but never saved back (would corrupt the bytes) */
+  readOnly?: boolean
+  encoding?: string
   pendingPosition?: { line: number; column: number }
   isDiff?: boolean
   diffOriginal?: {
@@ -315,6 +318,8 @@ interface AppState {
   setFocusedPane: (envId: string, tabId: string, paneId: string, terminalId: string) => void
 
   openFile: (envId: string, filePath: string, pos?: { line: number; column: number }, group?: 0 | 1) => Promise<void>
+  retryLoadTab: (tabId: string) => Promise<void>
+  retargetTabsForPath: (envId: string, oldPath: string, newPath: string) => void
   openDiffTab: (origTabId: string, modTabId: string) => void
   setActiveTab: (tabId: string, group?: 0 | 1) => void
   cycleEditorTab: (delta: 1 | -1) => void
@@ -420,6 +425,7 @@ const storedEditorFont = Number(localStorage.getItem('multiplex-editor-font'))
 const storedTermFont = Number(localStorage.getItem('multiplex-terminal-font'))
 const restoringTmuxEnvsInFlight = new Set<string>()
 const ensuringTerminalInFlight = new Map<string, Promise<string | null>>()
+const savesInFlight = new Map<string, Promise<boolean>>()
 
 export const useAppStore = create<AppState>((set, get) => ({
   theme: (localStorage.getItem('multiplex-theme') as EditorThemeId) || 'monokai',
@@ -564,8 +570,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   setEnvironments: (environments, syncDefaults = false) =>
     set((s) => {
       const nextRoots = { ...s.envRootPaths }
+      const prevById = new Map(s.environments.map((e) => [e.id, e]))
       for (const e of environments) {
-        if (!nextRoots[e.id] || syncDefaults) {
+        const prevDefault = prevById.get(e.id)?.defaultPath
+        // On config hot-reload only move an explorer whose configured defaultPath actually changed,
+        // instead of yanking every explorer back to its default folder on any config save.
+        if (!nextRoots[e.id] || (syncDefaults && prevDefault !== undefined && prevDefault !== e.defaultPath)) {
           nextRoots[e.id] = e.defaultPath
         }
       }
@@ -1220,6 +1230,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         activeTabId: targetGroup === 0 ? tabId : s.activeTabId,
         secondaryTabId: targetGroup === 1 ? tabId : s.secondaryTabId
       }))
+      // Re-opening a tab that previously failed to load retries the read instead of showing the stale error
+      if (existing.error && !existing.loading) {
+        await get().retryLoadTab(tabId)
+      }
       return
     }
 
@@ -1257,6 +1271,8 @@ export const useAppStore = create<AppState>((set, get) => ({
                 content: res.content,
                 savedContent: res.content,
                 isBinary: res.isBinary,
+                readOnly: res.readOnly,
+                encoding: res.encoding,
                 loading: false,
                 error: undefined
               }
@@ -1271,6 +1287,68 @@ export const useAppStore = create<AppState>((set, get) => ({
       }))
     }
   },
+
+  retryLoadTab: async (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId)
+    if (!tab || tab.isDiff || tab.loading) return
+    set((s) => ({
+      tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, loading: true, error: undefined } : t))
+    }))
+    try {
+      const res = await window.multiplex.readFile(tab.envId, tab.path)
+      set((s) => ({
+        tabs: s.tabs.map((t) =>
+          t.id === tabId
+            ? {
+                ...t,
+                content: res.content,
+                savedContent: res.content,
+                isDirty: false,
+                isBinary: res.isBinary,
+                readOnly: res.readOnly,
+                encoding: res.encoding,
+                loading: false,
+                error: undefined
+              }
+            : t
+        )
+      }))
+    } catch (err: any) {
+      set((s) => ({
+        tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, loading: false, error: err?.message || String(err) } : t))
+      }))
+    }
+  },
+
+  retargetTabsForPath: (envId, oldPath, newPath) =>
+    set((s) => {
+      const remap = (p: string): string | null => {
+        if (p === oldPath) return newPath
+        if (p.startsWith(oldPath + '/')) return newPath + p.slice(oldPath.length)
+        return null
+      }
+      const idMap = new Map<string, string>()
+      const tabs = s.tabs.map((t) => {
+        if (t.envId !== envId || t.isDiff) return t
+        const next = remap(t.path)
+        if (!next) return t
+        const nextId = `${envId}::${next}`
+        idMap.set(t.id, nextId)
+        return {
+          ...t,
+          id: nextId,
+          path: next,
+          name: next.split('/').pop() || next,
+          language: detectLanguageFromFilename(next)
+        }
+      })
+      if (idMap.size === 0) return s
+      return {
+        tabs,
+        activeTabId: s.activeTabId ? idMap.get(s.activeTabId) ?? s.activeTabId : s.activeTabId,
+        secondaryTabId: s.secondaryTabId ? idMap.get(s.secondaryTabId) ?? s.secondaryTabId : s.secondaryTabId
+      }
+    }),
 
   openDiffTab: (origTabId, modTabId) => {
     const orig = get().tabs.find((t) => t.id === origTabId)
@@ -1343,21 +1421,47 @@ export const useAppStore = create<AppState>((set, get) => ({
     })),
 
   saveTab: async (tabId) => {
-    const tab = get().tabs.find((t) => t.id === tabId)
-    if (!tab || tab.isBinary || tab.loading || tab.isDiff) return false
-    try {
-      await window.multiplex.writeFile(tab.envId, tab.path, tab.content)
-      set((s) => ({
-        tabs: s.tabs.map((t) =>
-          t.id === tabId ? { ...t, savedContent: t.content, isDirty: false } : t
-        )
-      }))
-      const isCfg = get().configPath && tab.path === get().configPath
-      get().addToast('success', isCfg ? 'Saved config — Workspaces reloaded!' : `Saved ${tab.name}`)
-      return true
-    } catch (err: any) {
-      get().addToast('error', `Save failed: ${err?.message || err}`)
+    const initial = get().tabs.find((t) => t.id === tabId)
+    // Never write a tab whose content never loaded (error) — that would truncate the real file to 0 bytes!
+    if (!initial || initial.isBinary || initial.loading || initial.isDiff || initial.error) return false
+    if (initial.readOnly) {
+      get().addToast(
+        'error',
+        `${initial.name} is ${initial.encoding || 'non-UTF-8'} encoded — opened read-only to avoid corrupting it`
+      )
       return false
+    }
+
+    // Serialize saves per tab so two overlapping SFTP write streams never interleave on the same file
+    const prev = savesInFlight.get(tabId)
+    if (prev) await prev.catch(() => false)
+
+    const tab = get().tabs.find((t) => t.id === tabId)
+    if (!tab || tab.isBinary || tab.loading || tab.isDiff || tab.error) return false
+    const written = tab.content
+
+    const task = (async () => {
+      try {
+        await window.multiplex.writeFile(tab.envId, tab.path, written)
+        set((s) => ({
+          tabs: s.tabs.map((t) =>
+            // Only mark what was actually written as saved; keystrokes typed during the save stay dirty
+            t.id === tabId ? { ...t, savedContent: written, isDirty: t.content !== written } : t
+          )
+        }))
+        const isCfg = get().configPath && tab.path === get().configPath
+        get().addToast('success', isCfg ? 'Saved config — Workspaces reloaded!' : `Saved ${tab.name}`)
+        return true
+      } catch (err: any) {
+        get().addToast('error', `Save failed: ${err?.message || err}`)
+        return false
+      }
+    })()
+    savesInFlight.set(tabId, task)
+    try {
+      return await task
+    } finally {
+      if (savesInFlight.get(tabId) === task) savesInFlight.delete(tabId)
     }
   },
 
