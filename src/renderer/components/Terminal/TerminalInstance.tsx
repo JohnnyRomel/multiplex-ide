@@ -13,7 +13,9 @@ export function getXtermTheme(theme: EditorThemeId) {
       background: '#272e36',
       foreground: '#d8dee9',
       cursor: '#f9ae58',
-      selectionBackground: '#4e5a65',
+      cursorAccent: '#272e36',
+      selectionBackground: 'rgba(102, 153, 204, 0.34)',
+      selectionInactiveBackground: 'rgba(102, 153, 204, 0.18)',
       black: '#1e232a',
       red: '#ec5f67',
       green: '#99c794',
@@ -37,7 +39,9 @@ export function getXtermTheme(theme: EditorThemeId) {
       background: '#21252b',
       foreground: '#dcdfe4',
       cursor: '#528bff',
-      selectionBackground: '#3e4451',
+      cursorAccent: '#21252b',
+      selectionBackground: 'rgba(97, 175, 239, 0.32)',
+      selectionInactiveBackground: 'rgba(97, 175, 239, 0.17)',
       black: '#181a1f',
       red: '#e06c75',
       green: '#98c379',
@@ -60,7 +64,9 @@ export function getXtermTheme(theme: EditorThemeId) {
     background: '#22231e',
     foreground: '#f8f8f2',
     cursor: '#f8f8f0',
-    selectionBackground: '#49483e',
+    cursorAccent: '#22231e',
+    selectionBackground: 'rgba(166, 226, 46, 0.26)',
+    selectionInactiveBackground: 'rgba(255, 255, 255, 0.12)',
     black: '#272822',
     red: '#f92672',
     green: '#a6e22e',
@@ -139,6 +145,9 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     }
   }
 
+  const isVisibleRef = useRef(isVisible)
+  isVisibleRef.current = isVisible
+
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -157,10 +166,12 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
 
     const doFit = () => fitXterm(entry)
     requestAnimationFrame(doFit)
-    const settleFitTimer = setTimeout(doFit, 90)
+    const settleFitTimer = setTimeout(() => fitXterm(entry, { immediateIpc: true }), 90)
 
     let resizeRaf: number | null = null
     const observer = new ResizeObserver(() => {
+      // Skip ResizeObserver layout work on background tabs; they refit cleanly on becoming visible!
+      if (!isVisibleRef.current) return
       if (resizeRaf !== null) cancelAnimationFrame(resizeRaf)
       resizeRaf = requestAnimationFrame(() => {
         resizeRaf = null
@@ -185,10 +196,12 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
 
   // Live theme sync
   useEffect(() => {
-    if (xtermRef.current) {
-      xtermRef.current.options.theme = getXtermTheme(theme)
+    const entry = getXterm(terminalId)
+    if (entry) {
+      entry.term.options.theme = getXtermTheme(theme)
+      entry.canvas?.clearTextureAtlas()
     }
-  }, [theme])
+  }, [theme, terminalId])
 
   // Live font size sync (refit PTY rows/cols only when dimensions actually change!)
   useEffect(() => {
@@ -196,7 +209,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     if (!entry) return
     entry.term.options.fontSize = terminalFontSize
     if (isVisible) {
-      requestAnimationFrame(() => fitXterm(entry))
+      requestAnimationFrame(() => fitXterm(entry, { immediateIpc: true }))
     }
   }, [terminalFontSize, isVisible, terminalId])
 
@@ -204,7 +217,10 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
   useEffect(() => {
     const entry = getXterm(terminalId)
     if (isVisible && entry) {
-      const syncFit = () => fitXterm(entry)
+      const syncFit = () => {
+        fitXterm(entry, { immediateIpc: true })
+        entry.term.refresh(0, Math.max(0, entry.term.rows - 1))
+      }
       requestAnimationFrame(syncFit)
       const timer = setTimeout(syncFit, 80)
       return () => clearTimeout(timer)
@@ -216,7 +232,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     if (connState !== 'connected') return
     const timer = setTimeout(() => {
       const entry = getXterm(terminalId)
-      if (entry) fitXterm(entry, true)
+      if (entry) fitXterm(entry, { force: true, immediateIpc: true })
     }, 120)
     return () => clearTimeout(timer)
   }, [connState, termStatus?.tmuxSession, terminalId])
@@ -296,9 +312,13 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
         outline: isFocused ? '1px solid rgba(255,255,255,0.08)' : 'none',
         outlineOffset: '-1px'
       }}
-      onMouseDown={() => {
+      onMouseDown={(e) => {
         setFocusedPane(envId, tabId, paneId, terminalId)
-        requestAnimationFrame(() => xtermRef.current?.focus())
+        // xterm natively focuses its own textarea on clicks inside `.xterm`; only focus manually
+        // when clicking the pane header/frame so text drag-selection & IME are never interrupted!
+        if (!(e.target as HTMLElement | null)?.closest?.('.xterm')) {
+          requestAnimationFrame(() => xtermRef.current?.focus())
+        }
       }}
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDropPath}
@@ -678,6 +698,7 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
       <div
         ref={containerRef}
         className="flex-1 min-h-0 w-full overflow-hidden"
+        style={{ contain: 'strict' }}
         onContextMenu={(e) => {
           e.preventDefault()
           e.stopPropagation()

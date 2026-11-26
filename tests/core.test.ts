@@ -592,17 +592,10 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
 })
 
 describe('Anti-Flicker Terminal Frame Coalescer', () => {
-  it('holds DEC 2026 synchronized frames across split SSH chunks and flushes atomically on ESU', () => {
+  it('holds DEC 2026 synchronized frames across split SSH chunks and flushes synchronously on ESU (0ms extra lag)', () => {
     const flushed: string[] = []
-    let frameCb: (() => void) | null = null
     let timeoutCb: (() => void) | null = null
     const buf = new TerminalFrameBuffer((b) => flushed.push(b), {
-      scheduleFrame: (cb) => {
-        frameCb = cb
-        return () => {
-          if (frameCb === cb) frameCb = null
-        }
-      },
       scheduleTimeout: (cb) => {
         timeoutCb = cb
         return () => {
@@ -615,28 +608,21 @@ describe('Anti-Flicker Terminal Frame Coalescer', () => {
     buf.push('\x1b[?20')
     buf.push('26h\x1b[2J\x1b[H')
     expect(flushed).toEqual([])
-    expect(frameCb).toBeNull() // Held until ESU arrives!
     expect(timeoutCb).not.toBeNull() // Safety watchdog armed
 
     buf.push('rendered TUI line\x1b[?2026l')
-    expect(flushed).toEqual([])
-    expect(frameCb).not.toBeNull() // Ready for next VSync paint!
-    frameCb!()
+    // Flushes synchronously in 0ms as soon as ESU completes (no extra rAF frame penalty!)
     expect(flushed).toEqual(['\x1b[2J\x1b[Hrendered TUI line'])
+    expect(timeoutCb).toBeNull()
     buf.dispose()
   })
 
-  it('coalesces tmux 2.8 cursor-hide redraw cycles (`?25l` ... `?25h`) into a single write', () => {
+  it('coalesces tmux 2.8 cursor-hide redraw cycles (`?25l` ... `?25h`) and persistent hidden-cursor TUI bursts', () => {
     const flushed: string[] = []
-    let frameCb: (() => void) | null = null
     let timeoutCb: (() => void) | null = null
+    let fakeNow = 100
     const buf = new TerminalFrameBuffer((b) => flushed.push(b), {
-      scheduleFrame: (cb) => {
-        frameCb = cb
-        return () => {
-          if (frameCb === cb) frameCb = null
-        }
-      },
+      now: () => fakeNow,
       scheduleTimeout: (cb) => {
         timeoutCb = cb
         return () => {
@@ -645,31 +631,38 @@ describe('Anti-Flicker Terminal Frame Coalescer', () => {
       }
     })
 
-    // Chunk 1: hide cursor + erase lines (typical tmux 2.8 / Ink TUI mid-frame)
+    // Case A: `?25l` + erase held until `?25h` arrives, then flushed synchronously in 0ms
     buf.push('\x1b[?25l\x1b[2K\r')
     expect(flushed).toEqual([])
-    expect(frameCb).toBeNull() // Briefly held for redraw completion
     expect(timeoutCb).not.toBeNull()
 
-    // Chunk 2: new text + restore cursor
     buf.push('agy prompt > \x1b[?25h')
-    expect(frameCb).not.toBeNull()
-    frameCb!()
     expect(flushed).toEqual(['\x1b[?25l\x1b[2K\ragy prompt > \x1b[?25h'])
+    expect(timeoutCb).toBeNull()
+
+    // Case B: TUI app (`agy` thinking/spinner) hid cursor in an earlier packet (`cursor_flag=0`),
+    // then 80ms later sends a multi-packet `\x1b[row;colH` + `\x1b[K` redraw WITHOUT `?25l`/`?25h`
+    flushed.length = 0
+    buf.push('\x1b[?25l')
+    expect(flushed).toEqual(['\x1b[?25l']) // No erase yet -> flushed immediately, cursorKnownHidden=true
+    flushed.length = 0
+
+    fakeNow = 200
+    buf.push('\x1b[38;1H\x1b[Kspinner ')
+    expect(flushed).toEqual([]) // Held for sliding burst quiet window!
+    fakeNow = 201
+    buf.push('\x1b[39;1H\x1b[K> thinking...')
+    expect(flushed).toEqual([])
+    expect(timeoutCb).not.toBeNull()
+    timeoutCb!() // 4ms quiet window elapsed -> entire multi-packet frame flushed atomically!
+    expect(flushed).toEqual(['\x1b[38;1H\x1b[Kspinner \x1b[39;1H\x1b[K> thinking...'])
     buf.dispose()
   })
 
-  it('does NOT stall interactive typing or plain cursor-hide chunks lacking an erase sequence', () => {
+  it('flushes interactive typing echo synchronously in 0ms and carries split TrueColor CSI sequences across TCP packets', () => {
     const flushed: string[] = []
-    let frameCb: (() => void) | null = null
     let timeoutCb: (() => void) | null = null
     const buf = new TerminalFrameBuffer((b) => flushed.push(b), {
-      scheduleFrame: (cb) => {
-        frameCb = cb
-        return () => {
-          if (frameCb === cb) frameCb = null
-        }
-      },
       scheduleTimeout: (cb) => {
         timeoutCb = cb
         return () => {
@@ -678,12 +671,24 @@ describe('Anti-Flicker Terminal Frame Coalescer', () => {
       }
     })
 
-    // Plain typing echo or TUI cursor hide WITHOUT clear-line/clear-screen must flush on next VSync immediately
-    buf.push('\x1b[?25lhello')
+    buf.push('a')
     expect(timeoutCb).toBeNull()
-    expect(frameCb).not.toBeNull()
-    frameCb!()
-    expect(flushed).toEqual(['\x1b[?25lhello'])
+    expect(flushed).toEqual(['a'])
+
+    buf.push('\x1b[?25lhello\x1b[?25h')
+    expect(timeoutCb).toBeNull()
+    expect(flushed).toEqual(['a', '\x1b[?25lhello\x1b[?25h'])
+
+    // Split long TrueColor foreground+background SGR sequence across two TCP packets
+    flushed.length = 0
+    buf.push('prefix\x1b[38;2;255;128;64;48;2;')
+    expect(flushed).toEqual(['prefix'])
+    buf.push('10;20;30mRGB\x1b[0m')
+    expect(flushed).toEqual(['prefix', '\x1b[38;2;255;128;64;48;2;10;20;30mRGB\x1b[0m'])
+
+    // Verify tmux bootstrap enables DEC 2026 sync feature for tmux 3.2+
+    const bootstrap = buildRemoteTmuxBootstrapCommand('mide_1')
+    expect(bootstrap).toContain("terminal-features ',xterm*:sync'")
     buf.dispose()
   })
 })

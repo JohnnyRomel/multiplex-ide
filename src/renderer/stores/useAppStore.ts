@@ -1206,17 +1206,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
 
   setFocusedPane: (envId, tabId, paneId, terminalId) =>
-    set((s) => ({
-      terminalTabsByEnv: {
-        ...s.terminalTabsByEnv,
-        [envId]: (s.terminalTabsByEnv[envId] || []).map((t) =>
-          t.id === tabId ? { ...t, focusedPaneId: paneId, hasUnread: false } : t
-        )
-      },
-      activeTerminalTabByEnv: { ...s.activeTerminalTabByEnv, [envId]: tabId },
-      focusedTerminalId: terminalId,
-      activeFocusArea: 'terminal'
-    })),
+    set((s) => {
+      const curTab = (s.terminalTabsByEnv[envId] || []).find((t) => t.id === tabId)
+      if (
+        s.focusedTerminalId === terminalId &&
+        s.activeFocusArea === 'terminal' &&
+        s.activeTerminalTabByEnv[envId] === tabId &&
+        curTab?.focusedPaneId === paneId &&
+        !curTab?.hasUnread
+      ) {
+        return s
+      }
+      return {
+        terminalTabsByEnv: {
+          ...s.terminalTabsByEnv,
+          [envId]: (s.terminalTabsByEnv[envId] || []).map((t) =>
+            t.id === tabId ? { ...t, focusedPaneId: paneId, hasUnread: false } : t
+          )
+        },
+        activeTerminalTabByEnv: { ...s.activeTerminalTabByEnv, [envId]: tabId },
+        focusedTerminalId: terminalId,
+        activeFocusArea: 'terminal'
+      }
+    }),
 
   openFile: async (envId, filePath, pos, group) => {
     const tabId = `${envId}::${filePath}`

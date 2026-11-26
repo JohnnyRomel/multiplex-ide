@@ -22,6 +22,8 @@ const MAX_PENDING_OUTPUT_BYTES = 256 * 1024
 // Hard safety cap: macOS only has ~511 PTYs system-wide (kern.tty.ptmx_max); never let a bug or
 // runaway reconnect exhaust them for every other app on the machine.
 const MAX_LIVE_PTYS = 96
+// Restores cursor visibility & closes any interrupted DEC 2026 sync frame on abrupt SSH drop
+const TERMINAL_MODE_RECOVERY = '\x1b[?2026l\x1b[?25h\x1b[0m'
 const IDLE_SHELL_COMMANDS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'csh', 'tcsh'])
 
 let checkedSpawnHelperPerms = false
@@ -96,6 +98,9 @@ interface ManagedTerminal {
   rendererReady: boolean
   pendingOutput: string[]
   pendingBytes: number
+  ipcBatchBuffer: string
+  ipcBatchTimer: NodeJS.Timeout | null
+  lastIpcFlushAt: number
   tmuxSession?: string
   attachRecentPending: boolean
   awaitingTmuxAttach: boolean
@@ -332,6 +337,7 @@ export function buildRemoteTmuxBootstrapCommand(
     `tmux set-option -g window-size latest >/dev/null 2>&1 || true; ` +
     `tmux set-option -t "$MIDE_S" history-limit 50000 >/dev/null 2>&1 || true; ` +
     `tmux show-options -s terminal-overrides 2>/dev/null | grep -q 'Ms=' || tmux set-option -as terminal-overrides ',xterm*:Ms=\\E]52;%p1%s;%p2%s\\007' >/dev/null 2>&1 || true; ` +
+    `tmux show-options -s terminal-features 2>/dev/null | grep -q 'sync' || tmux set-option -as terminal-features ',xterm*:sync' >/dev/null 2>&1 || true; ` +
     `tmux set-option -s set-clipboard on >/dev/null 2>&1 || true; ` +
     `tmux set-option -g set-clipboard on >/dev/null 2>&1 || true; ` +
     `tmux bind-key -T copy-mode WheelUpPane select-pane '\\;' send-keys -X -N 3 scroll-up >/dev/null 2>&1 || true; ` +
@@ -398,6 +404,9 @@ export class TerminalManager {
       rendererReady: false,
       pendingOutput: [],
       pendingBytes: 0,
+      ipcBatchBuffer: '',
+      ipcBatchTimer: null,
+      lastIpcFlushAt: 0,
       tmuxSession,
       attachRecentPending,
       awaitingTmuxAttach: attachRecentPending,
@@ -437,21 +446,57 @@ export class TerminalManager {
     for (const fn of waiters) fn()
   }
 
+  private flushIpcBatch(managed: ManagedTerminal): void {
+    if (managed.ipcBatchTimer) {
+      clearTimeout(managed.ipcBatchTimer)
+      managed.ipcBatchTimer = null
+    }
+    if (!managed.ipcBatchBuffer) return
+    const batch = managed.ipcBatchBuffer
+    managed.ipcBatchBuffer = ''
+    managed.lastIpcFlushAt = Date.now()
+    this.events.onData(managed.info.id, batch)
+  }
+
   /**
-   * Forwards PTY output to the renderer, buffering (bounded, tail-preserving) until the renderer's
-   * xterm has subscribed so the first prompt / SSH banner / auth prompt is never lost.
+   * Forwards PTY output to the renderer with VS Code-style micro-batching:
+   * - Buffers until xterm is mounted so the initial prompt/banner is never dropped.
+   * - 0ms synchronous fast-path for interactive keystroke echo (small idle chunks).
+   * - 3ms coalescing (64KB cap) during TUI redraw bursts / fast build logs so Electron IPC never floods!
    */
   private pushData(terminalId: string, data: string): void {
     if (!data) return
     const managed = this.sessions.get(terminalId)
-    if (!managed || managed.rendererReady) {
+    if (!managed) {
       this.events.onData(terminalId, data)
       return
     }
-    managed.pendingOutput.push(data)
-    managed.pendingBytes += data.length
-    while (managed.pendingBytes > MAX_PENDING_OUTPUT_BYTES && managed.pendingOutput.length > 1) {
-      managed.pendingBytes -= managed.pendingOutput.shift()!.length
+    if (!managed.rendererReady) {
+      managed.pendingOutput.push(data)
+      managed.pendingBytes += data.length
+      while (managed.pendingBytes > MAX_PENDING_OUTPUT_BYTES && managed.pendingOutput.length > 1) {
+        managed.pendingBytes -= managed.pendingOutput.shift()!.length
+      }
+      return
+    }
+
+    const now = Date.now()
+    if (!managed.ipcBatchBuffer && data.length <= 512 && now - managed.lastIpcFlushAt >= 4) {
+      managed.lastIpcFlushAt = now
+      this.events.onData(terminalId, data)
+      return
+    }
+
+    managed.ipcBatchBuffer += data
+    if (managed.ipcBatchBuffer.length >= 64 * 1024) {
+      this.flushIpcBatch(managed)
+      return
+    }
+    if (!managed.ipcBatchTimer) {
+      managed.ipcBatchTimer = setTimeout(() => {
+        managed.ipcBatchTimer = null
+        this.flushIpcBatch(managed)
+      }, 3)
     }
   }
 
@@ -482,6 +527,7 @@ export class TerminalManager {
   }
 
   private clearPaneTimers(managed: ManagedTerminal): void {
+    this.flushIpcBatch(managed)
     if (managed.reconnectTimer) {
       clearTimeout(managed.reconnectTimer)
       managed.reconnectTimer = null
@@ -1110,7 +1156,7 @@ export class TerminalManager {
       managed.stoppedIntentionally = true
       this.pushData(
         managed.info.id,
-        `\r\n\x1b[90m─── Detached from tmux session${managed.tmuxSession ? ` (${managed.tmuxSession})` : ''}. Press Enter or click ↻ to re-attach ───\x1b[0m\r\n`
+        `${TERMINAL_MODE_RECOVERY}\r\n\x1b[90m─── Detached from tmux session${managed.tmuxSession ? ` (${managed.tmuxSession})` : ''}. Press Enter or click ↻ to re-attach ───\x1b[0m\r\n`
       )
       this.emitStatus(managed, { exitCode, message: 'Detached — press Enter or ↻ to re-attach' })
       return
@@ -1122,7 +1168,7 @@ export class TerminalManager {
       managed.stoppedIntentionally = true
       this.pushData(
         managed.info.id,
-        `\r\n\x1b[90m─── Session ended (exit ${exitCode}). Press Enter or click ↻ to reconnect ───\x1b[0m\r\n`
+        `${TERMINAL_MODE_RECOVERY}\r\n\x1b[90m─── Session ended (exit ${exitCode}). Press Enter or click ↻ to reconnect ───\x1b[0m\r\n`
       )
       this.emitStatus(managed, { exitCode, message: 'Session ended — press Enter or ↻' })
       return
@@ -1135,7 +1181,7 @@ export class TerminalManager {
       managed.stoppedIntentionally = true
       this.pushData(
         managed.info.id,
-        `\r\n\x1b[33m─── Interactive authentication ended. Press Enter or click ↻ to retry ───\x1b[0m\r\n`
+        `${TERMINAL_MODE_RECOVERY}\r\n\x1b[33m─── Interactive authentication ended. Press Enter or click ↻ to retry ───\x1b[0m\r\n`
       )
       this.emitStatus(managed, { exitCode, message: 'Auth required — press Enter or ↻ to retry' })
       return
@@ -1166,7 +1212,7 @@ export class TerminalManager {
       const reason = opts?.lastError ? ` (${summarizeSshError(opts.lastError)})` : ''
       this.pushData(
         managed.info.id,
-        `\r\n\x1b[31m─── Disconnected from ${managed.env.name}${reason}. Press Enter, Space, or click ↻ to reconnect ───\x1b[0m\r\n`
+        `${TERMINAL_MODE_RECOVERY}\r\n\x1b[31m─── Disconnected from ${managed.env.name}${reason}. Press Enter, Space, or click ↻ to reconnect ───\x1b[0m\r\n`
       )
       this.emitStatus(managed, {
         exitCode,
@@ -1190,7 +1236,7 @@ export class TerminalManager {
       : `code ${exitCode ?? '?'}`
     this.pushData(
       managed.info.id,
-      `\r\n\x1b[33m─── Connection lost (${reason}). Reconnecting to ${managed.env.name} in ${(baseDelay / 1000).toFixed(1)}s (${attempt}/${maxAttempts})... ───\x1b[0m\r\n`
+      `${TERMINAL_MODE_RECOVERY}\r\n\x1b[33m─── Connection lost (${reason}). Reconnecting to ${managed.env.name} in ${(baseDelay / 1000).toFixed(1)}s (${attempt}/${maxAttempts})... ───\x1b[0m\r\n`
     )
     this.emitStatus(managed, {
       exitCode,
@@ -1314,7 +1360,7 @@ export class TerminalManager {
     this.emitStatus(managed, { message: 'Reconnecting...' })
     this.pushData(
       managed.info.id,
-      `\r\n\x1b[36m─── Reconnecting to ${managed.env.name}${managed.tmuxSession ? ` (session ${managed.tmuxSession})` : ''}... ───\x1b[0m\r\n`
+      `${TERMINAL_MODE_RECOVERY}\r\n\x1b[36m─── Reconnecting to ${managed.env.name}${managed.tmuxSession ? ` (session ${managed.tmuxSession})` : ''}... ───\x1b[0m\r\n`
     )
 
     if (managed.env.kind === 'ssh') {

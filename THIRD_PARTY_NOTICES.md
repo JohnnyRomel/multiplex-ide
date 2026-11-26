@@ -9,10 +9,11 @@ This application incorporates open-source third-party software components under 
 
 | Package | Version | License | Scope | Source |
 | :--- | :--- | :--- | :--- | :--- |
+| `@xterm/addon-canvas` | `0.7.0` | MIT | Direct | [Link](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-canvas) |
 | `@xterm/addon-fit` | `0.10.0` | MIT | Direct | [Link](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit) |
 | `@xterm/addon-search` | `0.15.0` | MIT | Direct | [Link](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-search) |
+| `@xterm/addon-unicode11` | `0.9.0` | MIT | Direct | [Link](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-unicode11) |
 | `@xterm/addon-web-links` | `0.11.0` | MIT | Direct | [Link](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-web-links) |
-| `@xterm/addon-webgl` | `0.18.0` | MIT | Direct | [Link](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-webgl) |
 | `@xterm/xterm` | `5.5.0` | MIT | Direct | [Link](https://github.com/xtermjs/xterm.js) |
 | `allotment` | `1.20.6` | MIT | Direct | [Link](https://github.com/johnwalley/allotment) |
 | `electron` | `33.4.11` | MIT | Direct | [Link](https://github.com/electron/electron) |
@@ -53,6 +54,31 @@ Packaged desktop builds of MultiplexIDE distribute the Electron runtime (MIT Lic
 ---
 
 ## Full Third-Party License Texts
+
+### @xterm/addon-canvas (0.7.0) — MIT
+Repository: https://github.com/xtermjs/xterm.js/tree/master/addons/addon-canvas
+
+```text
+Copyright (c) 2017, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
 
 ### @xterm/addon-fit (0.10.0) — MIT
 Repository: https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit
@@ -104,11 +130,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @xterm/addon-web-links (0.11.0) — MIT
-Repository: https://github.com/xtermjs/xterm.js/tree/master/addons/addon-web-links
+### @xterm/addon-unicode11 (0.9.0) — MIT
+Repository: https://github.com/xtermjs/xterm.js/tree/master/addons/addon-unicode11
 
 ```text
-Copyright (c) 2017, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+Copyright (c) 2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -129,11 +155,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### @xterm/addon-webgl (0.18.0) — MIT
-Repository: https://github.com/xtermjs/xterm.js/tree/master/addons/addon-webgl
+### @xterm/addon-web-links (0.11.0) — MIT
+Repository: https://github.com/xtermjs/xterm.js/tree/master/addons/addon-web-links
 
 ```text
-Copyright (c) 2018, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+Copyright (c) 2017, The xterm.js authors (https://github.com/xtermjs/xterm.js)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
