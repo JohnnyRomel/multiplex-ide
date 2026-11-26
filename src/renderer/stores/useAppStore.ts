@@ -24,6 +24,24 @@ export interface TerminalTab {
   hasUnread?: boolean
 }
 
+export interface TerminalPrefs {
+  cursorStyle: 'block' | 'bar' | 'underline'
+  cursorBlink: boolean
+  copyOnSelect: boolean
+  dimInactivePanes: boolean
+  optionAsMeta: boolean
+  minimumContrast: boolean
+}
+
+export const DEFAULT_TERMINAL_PREFS: TerminalPrefs = {
+  cursorStyle: 'block',
+  cursorBlink: false, // iTerm2 default: calm steady cursor with zero flicker
+  copyOnSelect: false,
+  dimInactivePanes: true, // iTerm2 signature inactive split-pane dimming
+  optionAsMeta: true, // iTerm2 Esc+ Option key
+  minimumContrast: true // iTerm2 minimum contrast boost for dark ANSI text
+}
+
 export interface EditorTab {
   id: string
   envId: string
@@ -189,6 +207,14 @@ export function collectTerminalIds(node: TerminalSplitNode | undefined | null): 
   return node.children.flatMap((c) => collectTerminalIds(c))
 }
 
+export function collectLeafNodes(
+  node: TerminalSplitNode | undefined | null
+): Array<Extract<TerminalSplitNode, { type: 'leaf' }>> {
+  if (!node) return []
+  if (node.type === 'leaf') return [node]
+  return node.children.flatMap((c) => collectLeafNodes(c))
+}
+
 export function collectEnvTerminalIds(tabs: TerminalTab[] | undefined): string[] {
   if (!tabs || tabs.length === 0) return []
   return tabs.flatMap((t) => collectTerminalIds(t.root))
@@ -245,6 +271,8 @@ interface AppState {
   terminalTabsByEnv: Record<string, TerminalTab[]>
   activeTerminalTabByEnv: Record<string, string | undefined>
   terminalStatuses: Record<string, TerminalStatusEvent | undefined>
+  terminalPrefs: TerminalPrefs
+  zoomedPaneByTab: Record<string, string | null>
   restoredTmuxEnvs: Record<string, boolean>
   focusedTerminalId: string | null
   activeFocusArea: 'editor' | 'terminal'
@@ -314,6 +342,9 @@ interface AppState {
   killRemoteTmuxSession: (envId: string, sessionName: string) => Promise<boolean>
   pruneStaleTmuxSessions: (envId: string, minAgeSec?: number) => Promise<number>
   setTerminalStatus: (status: TerminalStatusEvent) => void
+  updateTerminalPrefs: (patch: Partial<TerminalPrefs>) => void
+  toggleZoomPane: (tabId: string, paneId?: string) => void
+  cycleFocusedPane: (envId: string, delta: 1 | -1) => void
   handleTerminalExited: (terminalId: string, envId: string) => void
   setFocusedPane: (envId: string, tabId: string, paneId: string, terminalId: string) => void
 
@@ -421,6 +452,40 @@ function persistTmuxTabsForEnv(
   }
 }
 
+const TERMINAL_PREFS_STORAGE_KEY = 'multiplex-terminal-prefs-v1'
+
+function loadTerminalPrefs(): TerminalPrefs {
+  try {
+    const raw = localStorage.getItem(TERMINAL_PREFS_STORAGE_KEY)
+    if (!raw) return { ...DEFAULT_TERMINAL_PREFS }
+    const parsed = JSON.parse(raw) as Partial<TerminalPrefs>
+    const cursorStyle =
+      parsed.cursorStyle === 'bar' || parsed.cursorStyle === 'underline' || parsed.cursorStyle === 'block'
+        ? parsed.cursorStyle
+        : DEFAULT_TERMINAL_PREFS.cursorStyle
+    return {
+      cursorStyle,
+      cursorBlink: typeof parsed.cursorBlink === 'boolean' ? parsed.cursorBlink : DEFAULT_TERMINAL_PREFS.cursorBlink,
+      copyOnSelect: typeof parsed.copyOnSelect === 'boolean' ? parsed.copyOnSelect : DEFAULT_TERMINAL_PREFS.copyOnSelect,
+      dimInactivePanes:
+        typeof parsed.dimInactivePanes === 'boolean' ? parsed.dimInactivePanes : DEFAULT_TERMINAL_PREFS.dimInactivePanes,
+      optionAsMeta: typeof parsed.optionAsMeta === 'boolean' ? parsed.optionAsMeta : DEFAULT_TERMINAL_PREFS.optionAsMeta,
+      minimumContrast:
+        typeof parsed.minimumContrast === 'boolean' ? parsed.minimumContrast : DEFAULT_TERMINAL_PREFS.minimumContrast
+    }
+  } catch {
+    return { ...DEFAULT_TERMINAL_PREFS }
+  }
+}
+
+function saveTerminalPrefs(prefs: TerminalPrefs): void {
+  try {
+    localStorage.setItem(TERMINAL_PREFS_STORAGE_KEY, JSON.stringify(prefs))
+  } catch {
+    // ignore storage errors
+  }
+}
+
 const storedEditorFont = Number(localStorage.getItem('multiplex-editor-font'))
 const storedTermFont = Number(localStorage.getItem('multiplex-terminal-font'))
 const restoringTmuxEnvsInFlight = new Set<string>()
@@ -454,6 +519,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   terminalTabsByEnv: {},
   activeTerminalTabByEnv: {},
   terminalStatuses: {},
+  terminalPrefs: loadTerminalPrefs(),
+  zoomedPaneByTab: {},
   restoredTmuxEnvs: {},
   focusedTerminalId: null,
   activeFocusArea: 'editor',
@@ -1159,6 +1226,70 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { terminalStatuses: nextStatuses }
     }),
 
+  updateTerminalPrefs: (patch) =>
+    set((s) => {
+      const next = { ...s.terminalPrefs, ...patch }
+      saveTerminalPrefs(next)
+      return { terminalPrefs: next }
+    }),
+
+  toggleZoomPane: (tabId, paneId) =>
+    set((s) => {
+      const curZoomed = s.zoomedPaneByTab[tabId] || null
+      if (curZoomed && (!paneId || curZoomed === paneId)) {
+        const next = { ...s.zoomedPaneByTab }
+        delete next[tabId]
+        return { zoomedPaneByTab: next }
+      }
+      // Find the tab across envs to ensure it actually has >1 pane before zooming
+      let targetTab: TerminalTab | undefined
+      for (const tabs of Object.values(s.terminalTabsByEnv)) {
+        const found = tabs.find((t) => t.id === tabId)
+        if (found) {
+          targetTab = found
+          break
+        }
+      }
+      if (!targetTab) return s
+      const leaves = collectLeafNodes(targetTab.root)
+      if (leaves.length <= 1) return s
+      const chosenPaneId = paneId || targetTab.focusedPaneId || leaves[0].paneId
+      const leaf = leaves.find((l) => l.paneId === chosenPaneId) || leaves[0]
+      return {
+        zoomedPaneByTab: { ...s.zoomedPaneByTab, [tabId]: leaf.paneId },
+        focusedTerminalId: leaf.terminalId,
+        activeFocusArea: 'terminal'
+      }
+    }),
+
+  cycleFocusedPane: (envId, delta) =>
+    set((s) => {
+      const tabs = s.terminalTabsByEnv[envId] || []
+      const activeTabId = s.activeTerminalTabByEnv[envId] || tabs[0]?.id
+      const tab = tabs.find((t) => t.id === activeTabId)
+      if (!tab) return s
+      const leaves = collectLeafNodes(tab.root)
+      if (leaves.length <= 1) return s
+      const curIdx = Math.max(
+        0,
+        leaves.findIndex((l) => l.paneId === tab.focusedPaneId || l.terminalId === s.focusedTerminalId)
+      )
+      const nextLeaf = leaves[(curIdx + delta + leaves.length) % leaves.length]
+      // If tab was zoomed, update zoomed pane to the newly focused pane so cycling always reveals it
+      const nextZoomed = s.zoomedPaneByTab[tab.id]
+        ? { ...s.zoomedPaneByTab, [tab.id]: nextLeaf.paneId }
+        : s.zoomedPaneByTab
+      return {
+        terminalTabsByEnv: {
+          ...s.terminalTabsByEnv,
+          [envId]: tabs.map((t) => (t.id === tab.id ? { ...t, focusedPaneId: nextLeaf.paneId } : t))
+        },
+        zoomedPaneByTab: nextZoomed,
+        focusedTerminalId: nextLeaf.terminalId,
+        activeFocusArea: 'terminal'
+      }
+    }),
+
   handleTerminalExited: (terminalId, envId) =>
     set((s) => {
       const tabs = s.terminalTabsByEnv[envId] || []
@@ -1192,6 +1323,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       const nextStatuses = { ...s.terminalStatuses }
       delete nextStatuses[terminalId]
 
+      const nextZoomed = { ...s.zoomedPaneByTab }
+      if (removedTabId) delete nextZoomed[removedTabId]
+      for (const tab of nextTabs) {
+        const z = nextZoomed[tab.id]
+        if (z) {
+          const leaves = collectLeafNodes(tab.root)
+          if (leaves.length <= 1 || !leaves.some((l) => l.paneId === z)) {
+            delete nextZoomed[tab.id]
+          }
+        }
+      }
+
       const env = s.environments.find((e) => e.id === envId)
       if (env?.kind === 'ssh' && env.useTmux) {
         persistTmuxTabsForEnv(envId, nextTabs, nextActiveTabId, nextStatuses, s.envRootPaths[envId] || env.defaultPath)
@@ -1201,6 +1344,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         terminalTabsByEnv: { ...s.terminalTabsByEnv, [envId]: nextTabs },
         activeTerminalTabByEnv: { ...s.activeTerminalTabByEnv, [envId]: nextActiveTabId },
         terminalStatuses: nextStatuses,
+        zoomedPaneByTab: nextZoomed,
         focusedTerminalId: s.focusedTerminalId === terminalId ? nextLeaf?.terminalId ?? null : s.focusedTerminalId
       }
     }),

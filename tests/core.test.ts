@@ -28,6 +28,7 @@ import { SearchManager, parseGrepLine, parseRgJsonLine, scoreQuickOpenCandidate 
 import { enhancedCppLanguage, enhancedPythonLanguage } from '../src/shared/syntaxGrammars'
 import { decodeOsc52Payload } from '../src/shared/osc52'
 import { TerminalFrameBuffer } from '../src/shared/terminalFrameBuffer'
+import { analyzePasteSafety, flattenPasteToSingleLine, mapIterm2KeyEvent } from '../src/shared/terminalKeymap'
 // @ts-expect-error internal monaco esm module for unit testing Monarch compilation
 import { compile } from 'monaco-editor/esm/vs/editor/standalone/common/monarch/monarchCompile.js'
 import type { Environment, SearchDoneEvent, SearchMatch, TransferTask } from '../src/shared/types'
@@ -686,9 +687,43 @@ describe('Anti-Flicker Terminal Frame Coalescer', () => {
     buf.push('10;20;30mRGB\x1b[0m')
     expect(flushed).toEqual(['prefix', '\x1b[38;2;255;128;64;48;2;10;20;30mRGB\x1b[0m'])
 
-    // Verify tmux bootstrap enables DEC 2026 sync feature for tmux 3.2+
+    // Verify tmux bootstrap enables DEC 2026 sync feature & dynamic OSC titles for iTerm2-style pane headers
     const bootstrap = buildRemoteTmuxBootstrapCommand('mide_1')
     expect(bootstrap).toContain("terminal-features ',xterm*:sync'")
+    expect(bootstrap).toContain('set-titles on')
     buf.dispose()
+  })
+})
+
+describe('iTerm2 macOS Keymap & Multi-Line Paste Safety', () => {
+  it('maps macOS Natural Text Editing & Shift+Enter while preserving IME composition', () => {
+    const base = { type: 'keydown', metaKey: false, altKey: false, ctrlKey: false, shiftKey: false }
+
+    expect(mapIterm2KeyEvent({ ...base, metaKey: true, key: 'ArrowLeft' })).toBe('\x01')
+    expect(mapIterm2KeyEvent({ ...base, metaKey: true, key: 'ArrowRight' })).toBe('\x05')
+    expect(mapIterm2KeyEvent({ ...base, metaKey: true, key: 'Backspace' })).toBe('\x15')
+    expect(mapIterm2KeyEvent({ ...base, altKey: true, key: 'ArrowLeft' })).toBe('\x1bb')
+    expect(mapIterm2KeyEvent({ ...base, altKey: true, key: 'ArrowRight' })).toBe('\x1bf')
+    expect(mapIterm2KeyEvent({ ...base, altKey: true, key: 'Backspace' })).toBe('\x1b\x7f')
+    expect(mapIterm2KeyEvent({ ...base, shiftKey: true, key: 'Enter' })).toBe('\x1b\r')
+
+    // Never intercept IME composition (Chinese Pinyin / Japanese preedit)
+    expect(mapIterm2KeyEvent({ ...base, shiftKey: true, key: 'Enter', isComposing: true })).toBeNull()
+    expect(mapIterm2KeyEvent({ ...base, altKey: true, key: 'Backspace', keyCode: 229 })).toBeNull()
+    // Ignore keyup & plain keys
+    expect(mapIterm2KeyEvent({ ...base, type: 'keyup', metaKey: true, key: 'ArrowLeft' })).toBeNull()
+    expect(mapIterm2KeyEvent({ ...base, key: 'Enter' })).toBeNull()
+  })
+
+  it('guards multi-line pastes only when bracketed paste mode is off and flattens cleanly', () => {
+    expect(analyzePasteSafety('ls -la', false).safe).toBe(true)
+    expect(analyzePasteSafety('line1\nline2\nline3', true).safe).toBe(true)
+
+    const unsafe = analyzePasteSafety('rm -rf /tmp/foo\necho done\n', false)
+    expect(unsafe.safe).toBe(false)
+    expect(unsafe.lineCount).toBe(2)
+    expect(unsafe.preview).toBe('rm -rf /tmp/foo')
+
+    expect(flattenPasteToSingleLine('  git status \r\n  git diff \n')).toBe('git status git diff')
   })
 })

@@ -330,6 +330,8 @@ export function buildRemoteTmuxBootstrapCommand(
     `if ! tmux has-session -t "$MIDE_S" 2>/dev/null; then ${cdCmd}tmux -u new-session -d -s "$MIDE_S" "TERM=$MIDE_TERM exec \${SHELL:-/bin/bash} -l"; fi; ` +
     `tmux set-option -s default-terminal "$MIDE_TERM" >/dev/null 2>&1 || true; ` +
     `tmux set-option -t "$MIDE_S" status off >/dev/null 2>&1 || true; ` +
+    `tmux set-option -g set-titles on >/dev/null 2>&1 || true; ` +
+    `tmux set-option -g set-titles-string '#{pane_current_command} · #{b:pane_current_path}' >/dev/null 2>&1 || true; ` +
     `tmux set-option -g mouse on >/dev/null 2>&1 || true; ` +
     `tmux set-option -t "$MIDE_S" mouse on >/dev/null 2>&1 || true; ` +
     `tmux set-option -sg escape-time 10 >/dev/null 2>&1 || true; ` +

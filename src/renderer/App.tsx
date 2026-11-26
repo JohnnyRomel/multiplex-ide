@@ -222,11 +222,42 @@ export default function App() {
         return
       }
 
-      // Cmd+\ and Cmd+Shift+\ -> Split Terminal
+      // Cmd+\ and Cmd+Shift+\ -> Split Terminal (VS Code / cmux style)
       if (!e.altKey && e.code === 'Backslash') {
         e.preventDefault()
         e.stopPropagation()
         void state.splitTerminal(state.activeEnvId, e.shiftKey ? 'vertical' : 'horizontal')
+        return
+      }
+
+      // iTerm2 Terminal Shortcuts (active only when terminal has focus so Monaco Cmd+D stays untouched!)
+      const inTerminal = state.activeFocusArea === 'terminal' || state.layoutMode === 'terminal'
+
+      // Cmd+D / Cmd+Shift+D -> Split Terminal Right / Down (classic iTerm2!)
+      if (inTerminal && !e.altKey && key === 'd') {
+        e.preventDefault()
+        e.stopPropagation()
+        void state.splitTerminal(state.activeEnvId, e.shiftKey ? 'vertical' : 'horizontal')
+        return
+      }
+
+      // Cmd+[ / Cmd+] -> Cycle Focus Between Split Panes (classic iTerm2!)
+      if (inTerminal && !e.shiftKey && !e.altKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
+        e.preventDefault()
+        e.stopPropagation()
+        state.cycleFocusedPane(state.activeEnvId, e.code === 'BracketLeft' ? -1 : 1)
+        return
+      }
+
+      // Cmd+Shift+Enter -> Zoom / Restore Active Split Pane (classic iTerm2!)
+      if (inTerminal && e.shiftKey && !e.altKey && e.key === 'Enter') {
+        const tabs = state.terminalTabsByEnv[state.activeEnvId] || []
+        const activeTabId = state.activeTerminalTabByEnv[state.activeEnvId] || tabs[0]?.id
+        if (activeTabId) {
+          e.preventDefault()
+          e.stopPropagation()
+          state.toggleZoomPane(activeTabId)
+        }
         return
       }
 

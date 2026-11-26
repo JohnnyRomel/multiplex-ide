@@ -7,15 +7,22 @@ export { decodeOsc52Payload }
 export type ClipboardAction = 'cut' | 'copy' | 'paste' | 'selectAll'
 
 const terminalInstances = new Map<string, XTerm>()
+const terminalPasteHandlers = new Map<string, (text: string) => void>()
 const monacoEditors = new Map<string, monaco.editor.ICodeEditor>()
 
-export function registerTerminalInstance(terminalId: string, term: XTerm): void {
+export function registerTerminalInstance(
+  terminalId: string,
+  term: XTerm,
+  pasteHandler?: (text: string) => void
+): void {
   terminalInstances.set(terminalId, term)
+  if (pasteHandler) terminalPasteHandlers.set(terminalId, pasteHandler)
 }
 
 export function unregisterTerminalInstance(terminalId: string, term?: XTerm): void {
   if (!term || terminalInstances.get(terminalId) === term) {
     terminalInstances.delete(terminalId)
+    terminalPasteHandlers.delete(terminalId)
   }
 }
 
@@ -212,8 +219,13 @@ export function handleClipboardAction(action: ClipboardAction): void {
       if (action === 'paste') {
         const text = window.multiplex.readClipboardText()
         if (text) {
-          term.paste(text)
-          term.focus()
+          const customPaste = terminalPasteHandlers.get(state.focusedTerminalId)
+          if (customPaste) {
+            customPaste(text)
+          } else {
+            term.paste(text)
+            term.focus()
+          }
         }
         return
       }
