@@ -1,5 +1,5 @@
 /**
- * Pure iTerm2-style macOS terminal keymapping & multi-line paste safety helpers.
+ * Pure iTerm2-style macOS terminal keymapping, clipboard cleanup, and paste safety helpers.
  * Kept pure in `src/shared/` so all edge cases are covered by unit tests.
  */
 
@@ -89,4 +89,115 @@ export function flattenPasteToSingleLine(text: string): string {
     .map((l) => l.trim())
     .filter(Boolean)
     .join(' ')
+}
+
+/**
+ * Strips Bracketed Paste escape-injection markers (`\x1b[200~`, `\x1b[201~`) and NUL bytes
+ * before pasting into a terminal so clipboard content can never break out of bracketed paste mode.
+ */
+export function sanitizePasteText(text: string): string {
+  if (!text) return ''
+  return text.replace(/\x1b\[20[01]~/g, '').replace(/\x00/g, '')
+}
+
+/**
+ * iTerm2-style copy cleanup:
+ * - `trimTrailingSpaces`: strips trailing spaces/tabs per line (common from tmux/TUI padding)
+ *   while preserving leading indentation and line structure.
+ * - `joinLines`: unwraps hard-wrapped terminal lines cleanly (joins without extra space for
+ *   wrapped URLs/paths/tokens, or with a single space for normal commands/text).
+ */
+export function cleanCopiedText(
+  text: string,
+  opts?: { trimTrailingSpaces?: boolean; joinLines?: boolean }
+): string {
+  if (!text) return ''
+  const normalized = text.replace(/\r\n/g, '\n')
+  if (opts?.joinLines) {
+    const lines = normalized
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
+    if (lines.length <= 1) return lines[0] || ''
+    const isUnbrokenToken =
+      /^(https?:\/\/|ssh:\/\/|git@|\/|~\/)/.test(lines[0]) && lines.every((l) => !/\s/.test(l))
+    if (isUnbrokenToken) {
+      return lines.join('')
+    }
+    let out = lines[0]
+    for (let i = 1; i < lines.length; i++) {
+      const prev = out
+      const cur = lines[i]
+      // Avoid inserting a space after path/URL/flag separators if line broke right on them
+      if (/[\/=:\-_?&]$/.test(prev) && !/^\s/.test(cur)) {
+        out += cur
+      } else {
+        out += ' ' + cur
+      }
+    }
+    return out
+  }
+  if (opts?.trimTrailingSpaces !== false) {
+    return normalized
+      .split('\n')
+      .map((line) => line.replace(/[ \t]+$/g, ''))
+      .join('\n')
+  }
+  return normalized
+}
+
+/**
+ * Splits a large terminal paste into safe PTY-buffer-sized chunks (`<= 1024` chars) without
+ * breaking UTF-16 surrogate pairs (emoji / CJK Extension B) or bracketed paste escape markers.
+ */
+export function splitIntoPtyChunks(data: string, maxChunkChars = 1024): string[] {
+  if (!data) return []
+  const limit = Math.max(64, maxChunkChars)
+  if (data.length <= limit) return [data]
+
+  const chunks: string[] = []
+  let i = 0
+  while (i < data.length) {
+    let end = Math.min(data.length, i + limit)
+    if (end < data.length) {
+      // Never split a UTF-16 surrogate pair (high surrogate 0xD800..0xDBFF at `end - 1`)
+      const prevCode = data.charCodeAt(end - 1)
+      if (prevCode >= 0xd800 && prevCode <= 0xdbff && end > i + 1) {
+        end -= 1
+      }
+      // Avoid splitting right inside a short trailing `\x1b[200~` / `\x1b[201~` sequence
+      const lookbackStart = Math.max(i, end - 7)
+      const escIdx = data.lastIndexOf('\x1b', end - 1)
+      if (escIdx >= lookbackStart && escIdx > i) {
+        end = escIdx
+      }
+    }
+    chunks.push(data.slice(i, end))
+    i = end
+  }
+  return chunks
+}
+
+/**
+ * Extracts POSIX file paths from macOS `NSFilenamesPboardType` XML plist pasteboard buffers
+ * (used when user hits ⌘C on files in Finder and ⌘V inside a terminal).
+ */
+export function parseMacOsFilenamesPlist(rawXml: string): string[] {
+  if (!rawXml || !rawXml.includes('<string>')) return []
+  const paths: string[] = []
+  const re = /<string>([\s\S]*?)<\/string>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(rawXml)) !== null) {
+    const decoded = m[1]
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .trim()
+    if (decoded.startsWith('/')) {
+      paths.push(decoded)
+    }
+  }
+  return paths
 }

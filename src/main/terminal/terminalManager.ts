@@ -12,6 +12,7 @@ import type {
 } from '@shared/types'
 import { expandLocalTilde } from '../ssh/configParser'
 import { buildEnrichedEnv, isChannelLimitError, type SshControlMaster } from '../ssh/controlMaster'
+import { splitIntoPtyChunks } from '@shared/terminalKeymap'
 
 // Progressive backoff covering ~100s of VPN roam / gateway hiccup / server reboot without hammering proxies
 const RECONNECT_BACKOFF_MS = [2000, 3500, 5000, 8000, 12000, 16000, 22000, 30000]
@@ -101,6 +102,8 @@ interface ManagedTerminal {
   ipcBatchBuffer: string
   ipcBatchTimer: NodeJS.Timeout | null
   lastIpcFlushAt: number
+  writeQueue: string[]
+  writeTimer: NodeJS.Timeout | null
   tmuxSession?: string
   attachRecentPending: boolean
   awaitingTmuxAttach: boolean
@@ -340,6 +343,7 @@ export function buildRemoteTmuxBootstrapCommand(
     `tmux set-option -t "$MIDE_S" history-limit 50000 >/dev/null 2>&1 || true; ` +
     `tmux show-options -s terminal-overrides 2>/dev/null | grep -q 'Ms=' || tmux set-option -as terminal-overrides ',xterm*:Ms=\\E]52;%p1%s;%p2%s\\007' >/dev/null 2>&1 || true; ` +
     `tmux show-options -s terminal-features 2>/dev/null | grep -q 'sync' || tmux set-option -as terminal-features ',xterm*:sync' >/dev/null 2>&1 || true; ` +
+    `tmux set-option -g allow-passthrough on >/dev/null 2>&1 || true; ` +
     `tmux set-option -s set-clipboard on >/dev/null 2>&1 || true; ` +
     `tmux set-option -g set-clipboard on >/dev/null 2>&1 || true; ` +
     `tmux bind-key -T copy-mode WheelUpPane select-pane '\\;' send-keys -X -N 3 scroll-up >/dev/null 2>&1 || true; ` +
@@ -409,6 +413,8 @@ export class TerminalManager {
       ipcBatchBuffer: '',
       ipcBatchTimer: null,
       lastIpcFlushAt: 0,
+      writeQueue: [],
+      writeTimer: null,
       tmuxSession,
       attachRecentPending,
       awaitingTmuxAttach: attachRecentPending,
@@ -530,6 +536,11 @@ export class TerminalManager {
 
   private clearPaneTimers(managed: ManagedTerminal): void {
     this.flushIpcBatch(managed)
+    if (managed.writeTimer) {
+      clearTimeout(managed.writeTimer)
+      managed.writeTimer = null
+    }
+    managed.writeQueue = []
     if (managed.reconnectTimer) {
       clearTimeout(managed.reconnectTimer)
       managed.reconnectTimer = null
@@ -1500,11 +1511,46 @@ export class TerminalManager {
     }
   }
 
+  private drainWriteQueue(managed: ManagedTerminal): void {
+    if (managed.writeTimer) {
+      clearTimeout(managed.writeTimer)
+      managed.writeTimer = null
+    }
+    if (!managed.ptyProcess || managed.closedByUser || managed.writeQueue.length === 0) {
+      managed.writeQueue = []
+      return
+    }
+    const chunk = managed.writeQueue.shift()!
+    try {
+      managed.ptyProcess.write(chunk)
+    } catch {
+      managed.writeQueue = []
+      return
+    }
+    if (managed.writeQueue.length > 0) {
+      // Pace large pastes at ~1024B / 7ms (iTerm2 chunked paste) so macOS PTY/SSH/tmux
+      // buffers NEVER drop bytes or lose closing `\x1b[201~` bracketed-paste markers!
+      managed.writeTimer = setTimeout(() => {
+        managed.writeTimer = null
+        this.drainWriteQueue(managed)
+      }, 7)
+    }
+  }
+
   write(terminalId: string, data: string): void {
     const managed = this.sessions.get(terminalId)
-    if (!managed) return
+    if (!managed || !data) return
     if (managed.ptyProcess) {
-      managed.ptyProcess.write(data)
+      // 0ms fast-path for normal keystrokes and short pastes when queue is idle
+      if (managed.writeQueue.length === 0 && data.length <= 1024) {
+        managed.ptyProcess.write(data)
+        return
+      }
+      const chunks = splitIntoPtyChunks(data, 1024)
+      managed.writeQueue.push(...chunks)
+      if (!managed.writeTimer) {
+        this.drainWriteQueue(managed)
+      }
     } else if (managed.state !== 'reconnecting' && (data === '\r' || data === '\n' || data === ' ')) {
       // Pressing Enter or Space in a disconnected pane immediately triggers in-place reconnect/respawn!
       void this.reconnect(terminalId, { forceReset: managed.env.kind === 'ssh' })

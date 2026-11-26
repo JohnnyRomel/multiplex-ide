@@ -189,8 +189,11 @@ export class UnifiedVfs {
   }
 
   async writeFile(env: Environment, rawPath: string, content: string): Promise<void> {
+    await this.writeBuffer(env, rawPath, Buffer.from(content, 'utf8'))
+  }
+
+  async writeBuffer(env: Environment, rawPath: string, buf: Buffer): Promise<void> {
     const targetPath = await this.normalizePath(env, rawPath)
-    const buf = Buffer.from(content, 'utf8')
     if (env.kind === 'local') {
       await fsp.mkdir(path.dirname(targetPath), { recursive: true })
       await fsp.writeFile(targetPath, buf)

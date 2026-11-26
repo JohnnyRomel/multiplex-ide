@@ -5,8 +5,14 @@ import { SearchAddon } from '@xterm/addon-search'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { TerminalFrameBuffer } from '@shared/terminalFrameBuffer'
-import { analyzePasteSafety, mapIterm2KeyEvent } from '@shared/terminalKeymap'
-import { DEFAULT_TERMINAL_PREFS, type TerminalPrefs } from '@renderer/stores/useAppStore'
+import {
+  analyzePasteSafety,
+  cleanCopiedText,
+  flattenPasteToSingleLine,
+  mapIterm2KeyEvent,
+  sanitizePasteText
+} from '@shared/terminalKeymap'
+import { DEFAULT_TERMINAL_PREFS, type TerminalPrefs, useAppStore } from '@renderer/stores/useAppStore'
 import {
   decodeOsc52Payload,
   registerTerminalInstance,
@@ -21,23 +27,25 @@ import {
  *   hollow inactive cursor (`outline`), and steady-by-default cursor (zero jitter).
  * - Zero-flash resize via `proposeDimensions()` + direct `term.resize()` (skipping FitAddon's
  *   legacy `_renderService.clear()` blank flash) with 45ms remote SIGWINCH debounce.
- * - iTerm2 Natural Text Editing (`⌘←/→/⌫`, `⌥←/→/⌫`, `⇧⏎` newline for `agy`), `⌘+Click` URL
- *   protection, optional Copy-on-Select, dynamic `OSC 0/2` titles, visual bell, and bracketed-paste
- *   multi-line safety guard.
+ * - Full iTerm2 clipboard stack: trailing-space trim, unwrap/join copy, sanitized bracketed paste,
+ *   clipboard screenshot auto-upload over SSH, Finder file path paste, OSC 52 feedback, and
+ *   session Paste History (`⌘⇧H`).
  */
 export interface XtermHandlers {
   onToggleFind?: () => void
+  onTogglePasteHistory?: () => void
   onTitleChange?: (title: string) => void
   onBell?: () => void
   onScrollStateChange?: (isScrolledUp: boolean) => void
   onGeometryChange?: (cols: number, rows: number, isInitial: boolean) => void
-  onCopiedSelection?: () => void
+  onCopiedSelection?: (label?: string) => void
   onConfirmPaste?: (text: string, lineCount: number, preview: string) => void
   onLinkHover?: (uri: string | null) => void
 }
 
 export interface XtermEntry {
   terminalId: string
+  envId: string
   term: XTerm
   fit: FitAddon
   search: SearchAddon
@@ -73,22 +81,100 @@ export function getXterm(terminalId: string): XtermEntry | undefined {
   return entries.get(terminalId)
 }
 
+/**
+ * Copies the active xterm selection with iTerm2 cleanup (trailing-space trimming or line joining),
+ * records it in session Paste History, and flashes a subtle feedback pill in the pane header.
+ */
+export function copyFromTerminal(terminalId: string, opts?: { joinLines?: boolean }): boolean {
+  const entry = entries.get(terminalId)
+  if (!entry || !entry.term.hasSelection()) return false
+  const raw = entry.term.getSelection()
+  if (!raw) return false
+  const cleaned = cleanCopiedText(raw, {
+    trimTrailingSpaces: entry.prefs.trimTrailingSpacesOnCopy,
+    joinLines: opts?.joinLines
+  })
+  if (!cleaned) return false
+  window.multiplex.writeClipboardText(cleaned)
+  useAppStore.getState().recordClipboardHistory(cleaned, 'copy')
+  entry.handlers.onCopiedSelection?.(opts?.joinLines ? 'Copied (1 line)' : 'Copied')
+  return true
+}
+
+/**
+ * Pastes text into a terminal safely (strips bracketed-paste escape injection, enforces multi-line
+ * guard when bracketed paste mode is OFF, and records to session Paste History).
+ */
 export function pasteIntoTerminal(
   terminalId: string,
   text: string,
-  opts?: { force?: boolean }
+  opts?: { force?: boolean; recordHistory?: boolean }
 ): void {
   const entry = entries.get(terminalId)
   if (!entry || !text) return
+  const sanitized = sanitizePasteText(text)
+  if (!sanitized) return
   if (!opts?.force) {
-    const safety = analyzePasteSafety(text, entry.term.modes.bracketedPasteMode)
+    const safety = analyzePasteSafety(sanitized, entry.term.modes.bracketedPasteMode)
     if (!safety.safe && entry.handlers.onConfirmPaste) {
-      entry.handlers.onConfirmPaste(text, safety.lineCount, safety.preview)
+      entry.handlers.onConfirmPaste(sanitized, safety.lineCount, safety.preview)
       return
     }
   }
-  entry.term.paste(text)
+  if (opts?.recordHistory !== false) {
+    useAppStore.getState().recordClipboardHistory(sanitized, 'paste')
+  }
+  entry.term.paste(sanitized)
   entry.term.focus()
+}
+
+/**
+ * Rich async clipboard paste for terminals:
+ * 1) Finder copied files -> shell-quoted local paths (or auto-uploaded remote image for SSH)
+ * 2) Plain text -> sanitized paste (optional single-line flatten) + Paste History
+ * 3) Clipboard screenshot / image (`⌘⌃⇧4`) -> saved to `/tmp/mide-clip-*.png` locally OR
+ *    automatically uploaded via SFTP to remote `/tmp/mide-clip-*.png` and pasted straight into `agy`!
+ */
+export async function smartPasteIntoTerminal(
+  terminalId: string,
+  opts?: { flatten?: boolean }
+): Promise<void> {
+  const entry = entries.get(terminalId)
+  if (!entry) return
+  try {
+    const res = await window.multiplex.readClipboardForTerminal(entry.envId)
+    if (res.kind === 'error') {
+      if (res.error) useAppStore.getState().addToast('error', res.error)
+      return
+    }
+    if (res.kind === 'empty' || !res.text) return
+
+    if (res.kind === 'image') {
+      pasteIntoTerminal(terminalId, res.text, { force: true, recordHistory: true })
+      const kb = res.sizeBytes ? ` (${Math.max(1, Math.round(res.sizeBytes / 1024))} KB)` : ''
+      entry.handlers.onCopiedSelection?.(res.uploadedTo ? 'Image uploaded' : 'Image pasted')
+      useAppStore
+        .getState()
+        .addToast(
+          'info',
+          res.uploadedTo
+            ? `Uploaded clipboard image${kb} → ${res.uploadedTo}:${res.targetPath}`
+            : `Saved clipboard image${kb} → ${res.targetPath}`
+        )
+      return
+    }
+
+    if (res.kind === 'files') {
+      pasteIntoTerminal(terminalId, res.text, { force: true, recordHistory: true })
+      entry.handlers.onCopiedSelection?.(res.count && res.count > 1 ? `Pasted ${res.count} paths` : 'Path pasted')
+      return
+    }
+
+    const finalText = opts?.flatten ? flattenPasteToSingleLine(res.text) : res.text
+    pasteIntoTerminal(terminalId, finalText, { force: Boolean(opts?.flatten) })
+  } catch (err: any) {
+    useAppStore.getState().addToast('error', `Paste failed: ${err?.message || err}`)
+  }
 }
 
 export function applyTerminalPrefs(entry: XtermEntry, prefs: TerminalPrefs): void {
@@ -111,7 +197,7 @@ export function applyTerminalPrefsToAll(prefs: TerminalPrefs): void {
 
 export function getOrCreateXterm(
   terminalId: string,
-  opts: { fontSize: number; theme: ITheme; prefs?: TerminalPrefs }
+  opts: { envId: string; fontSize: number; theme: ITheme; prefs?: TerminalPrefs }
 ): XtermEntry {
   const existing = entries.get(terminalId)
   if (existing) return existing
@@ -156,6 +242,7 @@ export function getOrCreateXterm(
 
   const entry: XtermEntry = {
     terminalId,
+    envId: opts.envId,
     term,
     fit,
     search,
@@ -192,12 +279,22 @@ export function getOrCreateXterm(
   )
   term.unicode.activeVersion = '11'
 
-  registerTerminalInstance(terminalId, term, (text) => pasteIntoTerminal(terminalId, text))
+  registerTerminalInstance(terminalId, term, {
+    onCopy: () => copyFromTerminal(terminalId),
+    onPaste: () => void smartPasteIntoTerminal(terminalId)
+  })
 
-  // OSC 52: copying inside remote tmux / vim / neovim syncs to the macOS clipboard
+  // OSC 52: copying inside remote tmux / vim / neovim syncs to macOS clipboard + Paste History + badge
   const osc52 = term.parser.registerOscHandler(52, (data) => {
     const decoded = decodeOsc52Payload(data)
-    if (decoded !== null) window.multiplex.writeClipboardText(decoded)
+    if (decoded !== null) {
+      const cleaned = cleanCopiedText(decoded, {
+        trimTrailingSpaces: entry.prefs.trimTrailingSpacesOnCopy
+      })
+      window.multiplex.writeClipboardText(cleaned)
+      useAppStore.getState().recordClipboardHistory(cleaned, 'osc52')
+      entry.handlers.onCopiedSelection?.('Copied · tmux')
+    }
     return true
   })
 
@@ -239,11 +336,7 @@ export function getOrCreateXterm(
     entry.copyOnSelectTimer = setTimeout(() => {
       entry.copyOnSelectTimer = null
       if (!entry.prefs.copyOnSelect || !term.hasSelection()) return
-      const sel = term.getSelection()
-      if (sel) {
-        window.multiplex.writeClipboardText(sel)
-        entry.handlers.onCopiedSelection?.()
-      }
+      copyFromTerminal(terminalId)
     }, 90)
   })
 
@@ -262,12 +355,11 @@ export function getOrCreateXterm(
     if (ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey) {
       const k = ev.key.toLowerCase()
       if (k === 'c') {
-        if (term.hasSelection()) window.multiplex.writeClipboardText(term.getSelection())
+        copyFromTerminal(terminalId)
         return false
       }
       if (k === 'v') {
-        const text = window.multiplex.readClipboardText()
-        if (text) pasteIntoTerminal(terminalId, text)
+        void smartPasteIntoTerminal(terminalId)
         return false
       }
     }
@@ -275,17 +367,24 @@ export function getOrCreateXterm(
     if (ev.type === 'keydown' && ev.metaKey) {
       const k = ev.key.toLowerCase()
       if (!ev.shiftKey && !ev.altKey && k === 'f') {
+        ev.preventDefault()
         entry.handlers.onToggleFind?.()
         return false
       }
+      if (ev.shiftKey && !ev.altKey && k === 'h') {
+        ev.preventDefault()
+        entry.handlers.onTogglePasteHistory?.()
+        return false
+      }
       if (!ev.shiftKey && !ev.altKey && k === 'k') {
+        ev.preventDefault()
         term.clear()
         return false
       }
       // App-level / iTerm2 / macOS menu shortcuts must never be swallowed by the remote shell
       if (
         ['c', 'v', 'x', 'a', 'p', 't', 'w', 'b', 'j', 'd', ',', 's', '=', '+', '-', '0', '[', ']'].includes(k) ||
-        (ev.shiftKey && (k === 'f' || ev.key === 'Enter')) ||
+        (ev.shiftKey && (k === 'f' || k === 'h' || ev.key === 'Enter')) ||
         ev.code === 'Backslash' ||
         (k >= '1' && k <= '9')
       ) {

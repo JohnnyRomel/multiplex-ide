@@ -310,7 +310,7 @@ export const TerminalWorkspaceArea: React.FC = () => {
               const next = !showPrefs
               if (next) {
                 const rect = e.currentTarget.getBoundingClientRect()
-                const popH = 310
+                const popH = 375
                 const top =
                   rect.bottom + popH < window.innerHeight - 10
                     ? rect.bottom + 5
@@ -458,6 +458,8 @@ export const TerminalWorkspaceArea: React.FC = () => {
               [
                 ['dimInactivePanes', 'Dim inactive split panes'],
                 ['copyOnSelect', 'Copy to clipboard on select'],
+                ['trimTrailingSpacesOnCopy', 'Trim trailing spaces on copy'],
+                ['middleClickPaste', 'Middle-click to paste'],
                 ['optionAsMeta', 'Option key as Meta (Esc+)'],
                 ['minimumContrast', 'Minimum text contrast']
               ] as const
@@ -493,7 +495,7 @@ export const TerminalWorkspaceArea: React.FC = () => {
               color: 'var(--st-text-dim)'
             }}
           >
-            ⌘D Split · ⌘[/] Focus · ⌘⇧⏎ Zoom · ⇧⏎ Newline
+            ⌘D Split · ⌘[/] Focus · ⌘⇧⏎ Zoom · ⌘⇧H History
           </div>
         </div>
       )}

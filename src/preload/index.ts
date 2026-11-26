@@ -35,6 +35,17 @@ const api = {
     const val = ipcRenderer.sendSync(IPC.CLIPBOARD_READ_TEXT)
     return typeof val === 'string' ? val : ''
   },
+  readClipboardForTerminal: (
+    envId: string
+  ): Promise<{
+    kind: 'text' | 'image' | 'files' | 'empty' | 'error'
+    text: string
+    targetPath?: string
+    sizeBytes?: number
+    uploadedTo?: string
+    count?: number
+    error?: string
+  }> => ipcRenderer.invoke(IPC.CLIPBOARD_READ_FOR_TERMINAL, envId),
   writeClipboardText: (text: string): void => {
     ipcRenderer.send(IPC.CLIPBOARD_WRITE_TEXT, text)
   },

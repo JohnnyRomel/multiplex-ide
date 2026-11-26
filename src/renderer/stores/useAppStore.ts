@@ -28,15 +28,26 @@ export interface TerminalPrefs {
   cursorStyle: 'block' | 'bar' | 'underline'
   cursorBlink: boolean
   copyOnSelect: boolean
+  trimTrailingSpacesOnCopy: boolean
+  middleClickPaste: boolean
   dimInactivePanes: boolean
   optionAsMeta: boolean
   minimumContrast: boolean
+}
+
+export interface ClipboardHistoryItem {
+  id: string
+  text: string
+  timestamp: number
+  source: 'copy' | 'paste' | 'osc52'
 }
 
 export const DEFAULT_TERMINAL_PREFS: TerminalPrefs = {
   cursorStyle: 'block',
   cursorBlink: false, // iTerm2 default: calm steady cursor with zero flicker
   copyOnSelect: false,
+  trimTrailingSpacesOnCopy: true, // iTerm2 default: trim trailing spaces on copy
+  middleClickPaste: true, // Classic iTerm2 / Unix middle-click quick paste
   dimInactivePanes: true, // iTerm2 signature inactive split-pane dimming
   optionAsMeta: true, // iTerm2 Esc+ Option key
   minimumContrast: true // iTerm2 minimum contrast boost for dark ANSI text
@@ -272,6 +283,7 @@ interface AppState {
   activeTerminalTabByEnv: Record<string, string | undefined>
   terminalStatuses: Record<string, TerminalStatusEvent | undefined>
   terminalPrefs: TerminalPrefs
+  clipboardHistory: ClipboardHistoryItem[]
   zoomedPaneByTab: Record<string, string | null>
   restoredTmuxEnvs: Record<string, boolean>
   focusedTerminalId: string | null
@@ -343,6 +355,8 @@ interface AppState {
   pruneStaleTmuxSessions: (envId: string, minAgeSec?: number) => Promise<number>
   setTerminalStatus: (status: TerminalStatusEvent) => void
   updateTerminalPrefs: (patch: Partial<TerminalPrefs>) => void
+  recordClipboardHistory: (text: string, source: ClipboardHistoryItem['source']) => void
+  clearClipboardHistory: () => void
   toggleZoomPane: (tabId: string, paneId?: string) => void
   cycleFocusedPane: (envId: string, delta: 1 | -1) => void
   handleTerminalExited: (terminalId: string, envId: string) => void
@@ -467,6 +481,14 @@ function loadTerminalPrefs(): TerminalPrefs {
       cursorStyle,
       cursorBlink: typeof parsed.cursorBlink === 'boolean' ? parsed.cursorBlink : DEFAULT_TERMINAL_PREFS.cursorBlink,
       copyOnSelect: typeof parsed.copyOnSelect === 'boolean' ? parsed.copyOnSelect : DEFAULT_TERMINAL_PREFS.copyOnSelect,
+      trimTrailingSpacesOnCopy:
+        typeof parsed.trimTrailingSpacesOnCopy === 'boolean'
+          ? parsed.trimTrailingSpacesOnCopy
+          : DEFAULT_TERMINAL_PREFS.trimTrailingSpacesOnCopy,
+      middleClickPaste:
+        typeof parsed.middleClickPaste === 'boolean'
+          ? parsed.middleClickPaste
+          : DEFAULT_TERMINAL_PREFS.middleClickPaste,
       dimInactivePanes:
         typeof parsed.dimInactivePanes === 'boolean' ? parsed.dimInactivePanes : DEFAULT_TERMINAL_PREFS.dimInactivePanes,
       optionAsMeta: typeof parsed.optionAsMeta === 'boolean' ? parsed.optionAsMeta : DEFAULT_TERMINAL_PREFS.optionAsMeta,
@@ -520,6 +542,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeTerminalTabByEnv: {},
   terminalStatuses: {},
   terminalPrefs: loadTerminalPrefs(),
+  clipboardHistory: [],
   zoomedPaneByTab: {},
   restoredTmuxEnvs: {},
   focusedTerminalId: null,
@@ -1232,6 +1255,27 @@ export const useAppStore = create<AppState>((set, get) => ({
       saveTerminalPrefs(next)
       return { terminalPrefs: next }
     }),
+
+  recordClipboardHistory: (text, source) =>
+    set((s) => {
+      if (!text || !text.trim() || text.length > 100_000) return s
+      const existingIdx = s.clipboardHistory.findIndex((item) => item.text === text)
+      const entry: ClipboardHistoryItem = {
+        id: makeId('clip'),
+        text,
+        timestamp: Date.now(),
+        source
+      }
+      if (existingIdx === 0 && s.clipboardHistory[0].source === source) {
+        return s
+      }
+      const filtered = existingIdx >= 0 ? s.clipboardHistory.filter((_, i) => i !== existingIdx) : s.clipboardHistory
+      return {
+        clipboardHistory: [entry, ...filtered].slice(0, 25)
+      }
+    }),
+
+  clearClipboardHistory: () => set({ clipboardHistory: [] }),
 
   toggleZoomPane: (tabId, paneId) =>
     set((s) => {

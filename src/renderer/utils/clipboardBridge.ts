@@ -6,23 +6,28 @@ import { useAppStore } from '@renderer/stores/useAppStore'
 export { decodeOsc52Payload }
 export type ClipboardAction = 'cut' | 'copy' | 'paste' | 'selectAll'
 
+interface TerminalClipboardCallbacks {
+  onCopy?: () => boolean
+  onPaste?: () => void
+}
+
 const terminalInstances = new Map<string, XTerm>()
-const terminalPasteHandlers = new Map<string, (text: string) => void>()
+const terminalClipboardCallbacks = new Map<string, TerminalClipboardCallbacks>()
 const monacoEditors = new Map<string, monaco.editor.ICodeEditor>()
 
 export function registerTerminalInstance(
   terminalId: string,
   term: XTerm,
-  pasteHandler?: (text: string) => void
+  callbacks?: TerminalClipboardCallbacks
 ): void {
   terminalInstances.set(terminalId, term)
-  if (pasteHandler) terminalPasteHandlers.set(terminalId, pasteHandler)
+  if (callbacks) terminalClipboardCallbacks.set(terminalId, callbacks)
 }
 
 export function unregisterTerminalInstance(terminalId: string, term?: XTerm): void {
   if (!term || terminalInstances.get(terminalId) === term) {
     terminalInstances.delete(terminalId)
-    terminalPasteHandlers.delete(terminalId)
+    terminalClipboardCallbacks.delete(terminalId)
   }
 }
 
@@ -124,6 +129,7 @@ function performMonacoEditAction(ed: monaco.editor.ICodeEditor, action: Clipboar
     const { text } = extractMonacoCopyText(ed)
     if (text) {
       window.multiplex.writeClipboardText(text)
+      useAppStore.getState().recordClipboardHistory(text, 'copy')
     }
     return
   }
@@ -132,6 +138,7 @@ function performMonacoEditAction(ed: monaco.editor.ICodeEditor, action: Clipboar
     const { text, isWholeLine } = extractMonacoCopyText(ed)
     if (text) {
       window.multiplex.writeClipboardText(text)
+      useAppStore.getState().recordClipboardHistory(text, 'copy')
     }
     // Check readOnly option (id 94 in Monaco EditorOption, or use raw options safely)
     const opts = ed.getRawOptions()
@@ -207,25 +214,33 @@ export function handleClipboardAction(action: ClipboardAction): void {
   if (shouldTargetTerminal && state.focusedTerminalId) {
     const term = terminalInstances.get(state.focusedTerminalId)
     if (term) {
+      const cbs = terminalClipboardCallbacks.get(state.focusedTerminalId)
       if (action === 'copy' || action === 'cut') {
+        if (cbs?.onCopy && cbs.onCopy()) {
+          return
+        }
         if (term.hasSelection()) {
-          window.multiplex.writeClipboardText(term.getSelection())
+          const text = term.getSelection()
+          window.multiplex.writeClipboardText(text)
+          state.recordClipboardHistory(text, 'copy')
         } else {
           const domSel = window.getSelection()?.toString()
-          if (domSel) window.multiplex.writeClipboardText(domSel)
+          if (domSel) {
+            window.multiplex.writeClipboardText(domSel)
+            state.recordClipboardHistory(domSel, 'copy')
+          }
         }
         return
       }
       if (action === 'paste') {
+        if (cbs?.onPaste) {
+          cbs.onPaste()
+          return
+        }
         const text = window.multiplex.readClipboardText()
         if (text) {
-          const customPaste = terminalPasteHandlers.get(state.focusedTerminalId)
-          if (customPaste) {
-            customPaste(text)
-          } else {
-            term.paste(text)
-            term.focus()
-          }
+          term.paste(text)
+          term.focus()
         }
         return
       }

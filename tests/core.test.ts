@@ -28,7 +28,15 @@ import { SearchManager, parseGrepLine, parseRgJsonLine, scoreQuickOpenCandidate 
 import { enhancedCppLanguage, enhancedPythonLanguage } from '../src/shared/syntaxGrammars'
 import { decodeOsc52Payload } from '../src/shared/osc52'
 import { TerminalFrameBuffer } from '../src/shared/terminalFrameBuffer'
-import { analyzePasteSafety, flattenPasteToSingleLine, mapIterm2KeyEvent } from '../src/shared/terminalKeymap'
+import {
+  analyzePasteSafety,
+  cleanCopiedText,
+  flattenPasteToSingleLine,
+  mapIterm2KeyEvent,
+  parseMacOsFilenamesPlist,
+  sanitizePasteText,
+  splitIntoPtyChunks
+} from '../src/shared/terminalKeymap'
 // @ts-expect-error internal monaco esm module for unit testing Monarch compilation
 import { compile } from 'monaco-editor/esm/vs/editor/standalone/common/monarch/monarchCompile.js'
 import type { Environment, SearchDoneEvent, SearchMatch, TransferTask } from '../src/shared/types'
@@ -687,10 +695,11 @@ describe('Anti-Flicker Terminal Frame Coalescer', () => {
     buf.push('10;20;30mRGB\x1b[0m')
     expect(flushed).toEqual(['prefix', '\x1b[38;2;255;128;64;48;2;10;20;30mRGB\x1b[0m'])
 
-    // Verify tmux bootstrap enables DEC 2026 sync feature & dynamic OSC titles for iTerm2-style pane headers
+    // Verify tmux bootstrap enables DEC 2026 sync feature, OSC titles & allow-passthrough
     const bootstrap = buildRemoteTmuxBootstrapCommand('mide_1')
     expect(bootstrap).toContain("terminal-features ',xterm*:sync'")
     expect(bootstrap).toContain('set-titles on')
+    expect(bootstrap).toContain('allow-passthrough on')
     buf.dispose()
   })
 })
@@ -725,5 +734,37 @@ describe('iTerm2 macOS Keymap & Multi-Line Paste Safety', () => {
     expect(unsafe.preview).toBe('rm -rf /tmp/foo')
 
     expect(flattenPasteToSingleLine('  git status \r\n  git diff \n')).toBe('git status git diff')
+  })
+
+  it('cleans copied text, strips bracketed-paste injection, chunks large PTY pastes safely, and parses macOS Finder plists', () => {
+    // Trailing-space trim preserves indentation
+    expect(cleanCopiedText('  const x = 1   \n    return x\t \n', { trimTrailingSpaces: true })).toBe(
+      '  const x = 1\n    return x\n'
+    )
+    // Join wrapped URL without injecting spaces
+    expect(
+      cleanCopiedText('https://example.com/very/long/\npath/to/file?foo=bar\n&baz=1', { joinLines: true })
+    ).toBe('https://example.com/very/long/path/to/file?foo=bar&baz=1')
+    // Join wrapped shell command cleanly with spaces
+    expect(cleanCopiedText('git commit\n  -m "hello"', { joinLines: true })).toBe('git commit -m "hello"')
+
+    // Sanitize bracketed paste escape injection & NUL bytes
+    expect(sanitizePasteText('safe\x1b[201~evil\x1b[200~\x00end')).toBe('safeevilend')
+
+    // Chunking preserves surrogate pairs (emoji) and trailing CSI markers cleanly
+    const prefix = 'a'.repeat(63) + '🔥' + 'b'.repeat(70) + '\x1b[201~'
+    const chunks = splitIntoPtyChunks(prefix, 64)
+    expect(chunks.join('')).toBe(prefix)
+    // Surrogate pair '🔥' (2 UTF-16 code units) must NOT be split across chunk 0 and chunk 1
+    expect(chunks[0].length).toBe(63)
+    expect(chunks[1].startsWith('🔥')).toBe(true)
+
+    // macOS NSFilenamesPboardType XML plist parsing
+    const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><array>
+  <string>/Users/alice/docs/a &amp; b.png</string>
+  <string>/tmp/test&apos;s.txt</string>
+</array></plist>`
+    expect(parseMacOsFilenamesPlist(plist)).toEqual(["/Users/alice/docs/a & b.png", "/tmp/test's.txt"])
   })
 })

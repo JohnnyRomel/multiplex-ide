@@ -1,5 +1,9 @@
 import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
+import fs from 'fs'
+import fsp from 'fs/promises'
+import os from 'os'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import type {
   CustomHostInput,
   Environment,
@@ -8,6 +12,7 @@ import type {
   TransferRequest
 } from '@shared/types'
 import { IPC } from '@shared/ipc'
+import { parseMacOsFilenamesPlist } from '@shared/terminalKeymap'
 import type { EnvironmentRegistry } from '../ssh/configParser'
 import { setConfiguredExtraPathDirs, type SshControlMaster } from '../ssh/controlMaster'
 import type { TerminalManager } from '../terminal/terminalManager'
@@ -372,8 +377,144 @@ export function registerIpcHandlers(services: MainServices): void {
   })
 
   // --- System Clipboard & Native Edit ---
+  const shellQuotePath = (p: string) => `'${p.replace(/'/g, `'\\''`)}'`
+
+  const readFinderFilePaths = (): string[] => {
+    if (process.platform !== 'darwin') return []
+    const found: string[] = []
+    try {
+      const plistBuf = clipboard.readBuffer('NSFilenamesPboardType')
+      if (plistBuf && plistBuf.length > 0) {
+        const parsed = parseMacOsFilenamesPlist(plistBuf.toString('utf8'))
+        for (const p of parsed) {
+          if (fs.existsSync(p)) found.push(p)
+        }
+      }
+    } catch {
+      // ignore
+    }
+    if (found.length > 0) return found
+    try {
+      const rawUrl = clipboard.read('public.file-url')?.trim()
+      if (rawUrl && rawUrl.startsWith('file://')) {
+        const localPath = fileURLToPath(rawUrl)
+        if (localPath && fs.existsSync(localPath)) {
+          found.push(localPath)
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return found
+  }
+
   ipcMain.on(IPC.CLIPBOARD_READ_TEXT, (event) => {
     event.returnValue = clipboard.readText()
+  })
+
+  ipcMain.handle(IPC.CLIPBOARD_READ_FOR_TERMINAL, async (_event, envId: string) => {
+    const env = registry.get(envId)
+    const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif)$/i
+    const MAX_CLIP_IMAGE_BYTES = 20 * 1024 * 1024
+
+    // 1. macOS Finder copied files (`⌘C` in Finder -> `⌘V` in terminal)
+    const finderPaths = readFinderFilePaths()
+    if (finderPaths.length > 0) {
+      if (!env || env.kind === 'local') {
+        return {
+          kind: 'files' as const,
+          text: finderPaths.map(shellQuotePath).join(' ') + ' ',
+          count: finderPaths.length
+        }
+      }
+      // On SSH env: if user copied a single small image file in Finder, upload it straight to remote /tmp/!
+      if (finderPaths.length === 1 && IMAGE_EXT_RE.test(finderPaths[0])) {
+        try {
+          const st = await fsp.stat(finderPaths[0])
+          if (st.isFile() && st.size > 0 && st.size <= MAX_CLIP_IMAGE_BYTES) {
+            const connected = await controlMaster.isConnected(env)
+            if (connected) {
+              const ext = path.extname(finderPaths[0]).toLowerCase() || '.png'
+              const remotePath = `/tmp/mide-clip-${Date.now()}-${Math.random().toString(36).slice(2, 6)}${ext}`
+              const buf = await fsp.readFile(finderPaths[0])
+              await vfs.writeBuffer(env, remotePath, buf)
+              return {
+                kind: 'image' as const,
+                text: `${shellQuotePath(remotePath)} `,
+                targetPath: remotePath,
+                sizeBytes: buf.length,
+                uploadedTo: env.name
+              }
+            }
+          }
+        } catch (err: any) {
+          return {
+            kind: 'error' as const,
+            text: '',
+            error: `Failed to upload image to ${env.name}: ${err?.message || err}`
+          }
+        }
+      }
+    }
+
+    // 2. Standard plain text (99% fast path)
+    const text = clipboard.readText()
+    if (text) {
+      return { kind: 'text' as const, text }
+    }
+
+    // 3. Clipboard screenshot / image (`⌘⌃⇧4`, Feishu/WeChat screenshot -> `⌘V` in `agy`!)
+    try {
+      const img = clipboard.readImage()
+      if (img && !img.isEmpty()) {
+        const pngBuf = img.toPNG()
+        if (pngBuf.length === 0) return { kind: 'empty' as const, text: '' }
+        if (pngBuf.length > MAX_CLIP_IMAGE_BYTES) {
+          return {
+            kind: 'error' as const,
+            text: '',
+            error: `Clipboard image is too large (${(pngBuf.length / 1024 / 1024).toFixed(1)} MB)`
+          }
+        }
+        const fileName = `mide-clip-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`
+        if (!env || env.kind === 'local') {
+          const tmpDir = fs.existsSync('/tmp') ? '/tmp' : os.tmpdir()
+          const targetPath = path.join(tmpDir, fileName)
+          await fsp.writeFile(targetPath, pngBuf)
+          return {
+            kind: 'image' as const,
+            text: `${shellQuotePath(targetPath)} `,
+            targetPath,
+            sizeBytes: pngBuf.length
+          }
+        }
+        const connected = await controlMaster.isConnected(env)
+        if (!connected) {
+          return {
+            kind: 'error' as const,
+            text: '',
+            error: `${env.name} is not connected — cannot upload clipboard screenshot`
+          }
+        }
+        const remotePath = `/tmp/${fileName}`
+        await vfs.writeBuffer(env, remotePath, pngBuf)
+        return {
+          kind: 'image' as const,
+          text: `${shellQuotePath(remotePath)} `,
+          targetPath: remotePath,
+          sizeBytes: pngBuf.length,
+          uploadedTo: env.name
+        }
+      }
+    } catch (err: any) {
+      return {
+        kind: 'error' as const,
+        text: '',
+        error: `Clipboard image paste failed: ${err?.message || err}`
+      }
+    }
+
+    return { kind: 'empty' as const, text: '' }
   })
 
   ipcMain.on(IPC.CLIPBOARD_WRITE_TEXT, (_event, text: string) => {

@@ -8,6 +8,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  ClipboardList,
   Columns2,
   Maximize2,
   Minimize2,
@@ -25,11 +26,13 @@ import { flattenPasteToSingleLine } from '@shared/terminalKeymap'
 import { useAppStore } from '@renderer/stores/useAppStore'
 import {
   attachXterm,
+  copyFromTerminal,
   detachXterm,
   fitXterm,
   getOrCreateXterm,
   getXterm,
-  pasteIntoTerminal
+  pasteIntoTerminal,
+  smartPasteIntoTerminal
 } from './xtermRegistry'
 
 export function getXtermTheme(theme: EditorThemeId) {
@@ -150,6 +153,7 @@ export const TerminalInstance: React.FC<Props> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null)
   const findInputRef = useRef<HTMLInputElement>(null)
+  const historyInputRef = useRef<HTMLInputElement>(null)
   const xtermRef = useRef<XTerm | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchRef = useRef<SearchAddon | null>(null)
@@ -157,6 +161,8 @@ export const TerminalInstance: React.FC<Props> = ({
   const theme = useAppStore((s) => s.theme)
   const terminalFontSize = useAppStore((s) => s.terminalFontSize)
   const terminalPrefs = useAppStore((s) => s.terminalPrefs)
+  const clipboardHistory = useAppStore((s) => s.clipboardHistory)
+  const clearClipboardHistory = useAppStore((s) => s.clearClipboardHistory)
   const focusedTerminalId = useAppStore((s) => s.focusedTerminalId)
   const setFocusedPane = useAppStore((s) => s.setFocusedPane)
   const splitTerminal = useAppStore((s) => s.splitTerminal)
@@ -179,12 +185,17 @@ export const TerminalInstance: React.FC<Props> = ({
   const [findRegex, setFindRegex] = useState(false)
   const [findResult, setFindResult] = useState<{ index: number; count: number } | null>(null)
 
+  // iTerm2 Paste History Overlay (`⌘⇧H`) state
+  const [showPasteHistory, setShowPasteHistory] = useState(false)
+  const [historyFilter, setHistoryFilter] = useState('')
+  const [historyIdx, setHistoryIdx] = useState(0)
+
   // iTerm2 Dynamic Title, Visual Bell, Geometry HUD, Scroll Pill, Link Hint, Copy Toast & Paste Guard
   const [dynamicTitle, setDynamicTitle] = useState('')
   const [bellFlash, setBellFlash] = useState(false)
   const [isScrolledUp, setIsScrolledUp] = useState(false)
   const [geometryHud, setGeometryHud] = useState<{ cols: number; rows: number } | null>(null)
-  const [copiedBadge, setCopiedBadge] = useState(false)
+  const [copiedBadge, setCopiedBadge] = useState<string | null>(null)
   const [hoverLink, setHoverLink] = useState<string | null>(null)
   const [pendingPaste, setPendingPaste] = useState<{ text: string; lineCount: number; preview: string } | null>(null)
 
@@ -251,6 +262,7 @@ export const TerminalInstance: React.FC<Props> = ({
 
     const initState = useAppStore.getState()
     const entry = getOrCreateXterm(terminalId, {
+      envId,
       fontSize: initState.terminalFontSize,
       theme: getXtermTheme(initState.theme),
       prefs: initState.terminalPrefs
@@ -260,6 +272,7 @@ export const TerminalInstance: React.FC<Props> = ({
     setIsScrolledUp(entry.lastScrolledUp)
 
     entry.handlers.onToggleFind = () => {
+      setShowPasteHistory(false)
       setShowFind((prev) => {
         if (prev) {
           entry.search.clearDecorations()
@@ -274,16 +287,29 @@ export const TerminalInstance: React.FC<Props> = ({
         return true
       })
     }
+    entry.handlers.onTogglePasteHistory = () => {
+      setShowFind(false)
+      setShowPasteHistory((prev) => {
+        if (prev) {
+          requestAnimationFrame(() => entry.term.focus())
+          return false
+        }
+        setHistoryFilter('')
+        setHistoryIdx(0)
+        requestAnimationFrame(() => historyInputRef.current?.focus())
+        return true
+      })
+    }
     entry.handlers.onTitleChange = (t) => setDynamicTitle(t)
     entry.handlers.onScrollStateChange = (scrolledUp) => setIsScrolledUp(scrolledUp)
     entry.handlers.onLinkHover = (uri) => setHoverLink(uri)
     entry.handlers.onConfirmPaste = (text, lineCount, preview) => {
       setPendingPaste({ text, lineCount, preview })
     }
-    entry.handlers.onCopiedSelection = () => {
-      setCopiedBadge(true)
+    entry.handlers.onCopiedSelection = (label) => {
+      setCopiedBadge(label || 'Copied')
       if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current)
-      copiedTimerRef.current = setTimeout(() => setCopiedBadge(false), 950)
+      copiedTimerRef.current = setTimeout(() => setCopiedBadge(null), 1050)
     }
     entry.handlers.onBell = () => {
       setBellFlash(false)
@@ -410,10 +436,14 @@ export const TerminalInstance: React.FC<Props> = ({
 
   // Focus xterm cleanly without resizing when focus switches to this pane
   useEffect(() => {
-    if (isVisible && isFocused && !showFind && xtermRef.current) {
+    if (isVisible && isFocused && !showFind && !showPasteHistory && xtermRef.current) {
       requestAnimationFrame(() => xtermRef.current?.focus())
     }
-  }, [isVisible, isFocused, showFind, terminalId])
+  }, [isVisible, isFocused, showFind, showPasteHistory, terminalId])
+
+  const filteredHistory = historyFilter.trim()
+    ? clipboardHistory.filter((item) => item.text.toLowerCase().includes(historyFilter.trim().toLowerCase()))
+    : clipboardHistory
 
   useEffect(() => {
     if (!contextMenu) return
@@ -727,7 +757,7 @@ export const TerminalInstance: React.FC<Props> = ({
               className="rounded px-1.5 py-0 text-[10px] font-mono shrink-0"
               style={{ backgroundColor: 'rgba(166, 226, 46, 0.16)', color: 'var(--st-green)' }}
             >
-              Copied
+              {copiedBadge}
             </span>
           )}
           {connState === 'reconnecting' && (
@@ -888,6 +918,14 @@ export const TerminalInstance: React.FC<Props> = ({
             opacity: shouldDim ? 0.76 : 1,
             transition: 'opacity 140ms ease'
           }}
+          onAuxClick={(e) => {
+            if (e.button === 1 && terminalPrefs.middleClickPaste) {
+              e.preventDefault()
+              e.stopPropagation()
+              setFocusedPane(envId, tabId, paneId, terminalId)
+              void smartPasteIntoTerminal(terminalId)
+            }
+          }}
           onContextMenu={(e) => {
             e.preventDefault()
             e.stopPropagation()
@@ -895,6 +933,139 @@ export const TerminalInstance: React.FC<Props> = ({
             setContextMenu({ x: e.clientX, y: e.clientY })
           }}
         />
+
+        {/* iTerm2 Floating Paste History Picker (`⌘⇧H`) — ZERO layout shift / ZERO SIGWINCH! */}
+        {showPasteHistory && (
+          <div
+            onMouseDown={(e) => e.stopPropagation()}
+            className="absolute top-2 right-3 z-30 w-[350px] max-w-[92%] rounded-md border shadow-2xl text-[12px] overflow-hidden"
+            style={{
+              backgroundColor: 'rgba(24, 25, 21, 0.94)',
+              borderColor: 'var(--st-border-light)',
+              backdropFilter: 'blur(16px)'
+            }}
+          >
+            <div
+              className="flex items-center justify-between gap-2 px-2.5 py-1.5 border-b"
+              style={{ borderColor: 'var(--st-border)' }}
+            >
+              <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                <ClipboardList className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--st-accent)' }} />
+                <input
+                  ref={historyInputRef}
+                  autoFocus
+                  value={historyFilter}
+                  onChange={(e) => {
+                    setHistoryFilter(e.target.value)
+                    setHistoryIdx(0)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault()
+                      setShowPasteHistory(false)
+                      xtermRef.current?.focus()
+                    } else if (e.key === 'ArrowDown') {
+                      e.preventDefault()
+                      setHistoryIdx((i) => Math.min(Math.max(0, filteredHistory.length - 1), i + 1))
+                    } else if (e.key === 'ArrowUp') {
+                      e.preventDefault()
+                      setHistoryIdx((i) => Math.max(0, i - 1))
+                    } else if (e.key === 'Enter' && filteredHistory[historyIdx]) {
+                      e.preventDefault()
+                      const raw = filteredHistory[historyIdx].text
+                      setShowPasteHistory(false)
+                      const toPaste = e.shiftKey ? flattenPasteToSingleLine(raw) : raw
+                      pasteIntoTerminal(terminalId, toPaste, {
+                        force: e.shiftKey,
+                        recordHistory: false
+                      })
+                    }
+                  }}
+                  placeholder="Filter paste history... (⏎ paste · ⇧⏎ 1 line)"
+                  className="w-full bg-transparent py-0.5 font-mono text-[11.5px] outline-none"
+                  style={{ color: 'var(--st-text)' }}
+                />
+              </div>
+              {clipboardHistory.length > 0 && (
+                <button
+                  onClick={() => clearClipboardHistory()}
+                  title="Clear session paste history"
+                  className="rounded px-1.5 py-0.5 text-[10.5px] hover:bg-white/10 shrink-0"
+                  style={{ color: 'var(--st-text-dim)' }}
+                >
+                  Clear
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  setShowPasteHistory(false)
+                  xtermRef.current?.focus()
+                }}
+                title="Close (Esc)"
+                className="rounded p-0.5 hover:bg-white/10 shrink-0"
+                style={{ color: 'var(--st-text-dim)' }}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            <div className="max-h-[240px] overflow-y-auto py-1">
+              {filteredHistory.length === 0 ? (
+                <div className="px-3 py-4 text-center font-mono text-[11px]" style={{ color: 'var(--st-text-dim)' }}>
+                  {clipboardHistory.length === 0
+                    ? 'No clipboard items in this session yet'
+                    : 'No matching clipboard items'}
+                </div>
+              ) : (
+                filteredHistory.map((item, idx) => {
+                  const selected = idx === historyIdx
+                  const lineCount = item.text.split('\n').length
+                  const oneLinePreview = item.text.replace(/\s+/g, ' ').trim()
+                  const ageSec = Math.max(0, Math.floor((Date.now() - item.timestamp) / 1000))
+                  return (
+                    <div
+                      key={item.id}
+                      onMouseEnter={() => setHistoryIdx(idx)}
+                      onClick={(e) => {
+                        setShowPasteHistory(false)
+                        const toPaste = e.shiftKey ? flattenPasteToSingleLine(item.text) : item.text
+                        pasteIntoTerminal(terminalId, toPaste, {
+                          force: e.shiftKey,
+                          recordHistory: false
+                        })
+                      }}
+                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 cursor-pointer"
+                      style={{
+                        backgroundColor: selected ? 'rgba(255, 255, 255, 0.1)' : 'transparent'
+                      }}
+                      title={item.text.slice(0, 400)}
+                    >
+                      <span
+                        className="truncate font-mono text-[11.5px]"
+                        style={{ color: selected ? 'var(--st-text)' : 'var(--st-text-muted)' }}
+                      >
+                        {oneLinePreview}
+                      </span>
+                      <div className="flex items-center gap-1 shrink-0 font-mono text-[9.5px]">
+                        {lineCount > 1 && (
+                          <span
+                            className="rounded px-1"
+                            style={{ backgroundColor: 'rgba(255,255,255,0.08)', color: 'var(--st-text-muted)' }}
+                          >
+                            {lineCount}L
+                          </span>
+                        )}
+                        <span style={{ color: 'var(--st-text-dim)' }}>
+                          {item.source === 'osc52' ? 'tmux' : formatSessionAge(ageSec)}
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </div>
+        )}
 
         {/* iTerm2 Floating Translucent Find Overlay (ZERO layout reflow / ZERO SIGWINCH!) */}
         {showFind && (
@@ -1061,7 +1232,7 @@ export const TerminalInstance: React.FC<Props> = ({
         )}
 
         {/* iTerm2 Resize Geometry HUD (`142 × 38`) */}
-        {geometryHud && !showFind && !pendingPaste && (
+        {geometryHud && !showFind && !showPasteHistory && !pendingPaste && (
           <div
             className="pointer-events-none absolute top-2 right-3 z-20 rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums shadow-lg"
             style={{
@@ -1117,10 +1288,10 @@ export const TerminalInstance: React.FC<Props> = ({
       {/* Native-feeling iTerm2 Context Menu */}
       {contextMenu && (
         <div
-          className="fixed z-50 min-w-[205px] rounded-md border py-1 shadow-2xl text-[12px] select-none"
+          className="fixed z-50 min-w-[225px] rounded-md border py-1 shadow-2xl text-[12px] select-none"
           style={{
-            left: Math.min(contextMenu.x, window.innerWidth - 220),
-            top: Math.min(contextMenu.y, window.innerHeight - 310),
+            left: Math.min(contextMenu.x, window.innerWidth - 240),
+            top: Math.min(contextMenu.y, window.innerHeight - 385),
             backgroundColor: 'var(--st-panel)',
             borderColor: 'var(--st-border-light)',
             color: 'var(--st-text)',
@@ -1129,8 +1300,7 @@ export const TerminalInstance: React.FC<Props> = ({
         >
           <button
             onClick={() => {
-              const sel = xtermRef.current?.getSelection()
-              if (sel) window.multiplex.writeClipboardText(sel)
+              copyFromTerminal(terminalId)
               xtermRef.current?.focus()
               setContextMenu(null)
             }}
@@ -1142,8 +1312,18 @@ export const TerminalInstance: React.FC<Props> = ({
           </button>
           <button
             onClick={() => {
-              const text = window.multiplex.readClipboardText()
-              if (text) pasteIntoTerminal(terminalId, text)
+              copyFromTerminal(terminalId, { joinLines: true })
+              xtermRef.current?.focus()
+              setContextMenu(null)
+            }}
+            disabled={!xtermRef.current?.hasSelection()}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left hover:bg-white/10 disabled:opacity-40"
+          >
+            <span>Copy Without Line Breaks</span>
+          </button>
+          <button
+            onClick={() => {
+              void smartPasteIntoTerminal(terminalId)
               setContextMenu(null)
             }}
             className="flex w-full items-center justify-between px-3 py-1.5 text-left hover:bg-white/10"
@@ -1151,6 +1331,30 @@ export const TerminalInstance: React.FC<Props> = ({
             <span>Paste</span>
             <span className="font-mono text-[11px] opacity-60">⌘V</span>
           </button>
+          <button
+            onClick={() => {
+              void smartPasteIntoTerminal(terminalId, { flatten: true })
+              setContextMenu(null)
+            }}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left hover:bg-white/10"
+          >
+            <span>Paste as Single Line</span>
+          </button>
+          <button
+            onClick={() => {
+              setShowFind(false)
+              setHistoryFilter('')
+              setHistoryIdx(0)
+              setShowPasteHistory(true)
+              setContextMenu(null)
+              requestAnimationFrame(() => historyInputRef.current?.focus())
+            }}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left hover:bg-white/10"
+          >
+            <span>Paste History...</span>
+            <span className="font-mono text-[11px] opacity-60">⌘⇧H</span>
+          </button>
+          <div className="my-1 border-t" style={{ borderColor: 'var(--st-border)' }} />
           <button
             onClick={() => {
               xtermRef.current?.selectAll()
@@ -1164,6 +1368,7 @@ export const TerminalInstance: React.FC<Props> = ({
           </button>
           <button
             onClick={() => {
+              setShowPasteHistory(false)
               setShowFind(true)
               setContextMenu(null)
               requestAnimationFrame(() => findInputRef.current?.focus())

@@ -68,6 +68,7 @@ export const IPC = {
 
   // System Clipboard & Native Edit
   CLIPBOARD_READ_TEXT: 'clipboard:read-text',
+  CLIPBOARD_READ_FOR_TERMINAL: 'clipboard:read-for-terminal',
   CLIPBOARD_WRITE_TEXT: 'clipboard:write-text',
   CLIPBOARD_ACTION: 'clipboard:action',
   CLIPBOARD_NATIVE_EDIT: 'clipboard:native-edit'
