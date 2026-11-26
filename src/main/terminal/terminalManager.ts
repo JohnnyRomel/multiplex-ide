@@ -1,5 +1,6 @@
 import fs from 'fs'
 import os from 'os'
+import path from 'path'
 import * as pty from 'node-pty'
 import type {
   Environment,
@@ -17,6 +18,50 @@ const RECONNECT_BACKOFF_MS = [1500, 2500, 4000, 6000, 9000, 12000, 15000, 20000,
 const DEFAULT_RECENT_TMUX_MAX_AGE_SEC = 3600
 const HEALTH_CHECK_INTERVAL_MS = 18_000
 const IDLE_SHELL_COMMANDS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'csh', 'tcsh'])
+
+let checkedSpawnHelperPerms = false
+
+/**
+ * Ensures macOS `node-pty` `spawn-helper` binaries have executable (+x) permissions so
+ * `posix_spawnp` never fails with EACCES after fresh installs or app packaging.
+ */
+function ensureNodePtySpawnHelperExecutable(): void {
+  if (checkedSpawnHelperPerms || process.platform !== 'darwin') return
+  checkedSpawnHelperPerms = true
+  try {
+    const ptyEntry = require.resolve('node-pty')
+    const ptyRoot = path.resolve(path.dirname(ptyEntry), '..')
+    const candidates = [
+      path.join(ptyRoot, 'build', 'Release', 'spawn-helper'),
+      path.join(ptyRoot, 'prebuilds', `darwin-${process.arch}`, 'spawn-helper'),
+      path.join(ptyRoot, 'prebuilds', 'darwin-arm64', 'spawn-helper'),
+      path.join(ptyRoot, 'prebuilds', 'darwin-x64', 'spawn-helper')
+    ].map((p) => p.replace('app.asar', 'app.asar.unpacked'))
+
+    for (const helperPath of candidates) {
+      try {
+        if (!fs.existsSync(helperPath)) continue
+        const st = fs.statSync(helperPath)
+        if ((st.mode & 0o111) === 0) {
+          fs.chmodSync(helperPath, st.mode | 0o755)
+        }
+      } catch {
+        // ignore read-only / race errors
+      }
+    }
+  } catch {
+    // ignore resolution failures in bundled/test environments
+  }
+}
+
+function sanitizePtyEnv(rawEnv: NodeJS.ProcessEnv): Record<string, string> {
+  const clean: Record<string, string> = {}
+  for (const [k, v] of Object.entries(rawEnv)) {
+    if (v === undefined || k === 'ELECTRON_RUN_AS_NODE') continue
+    clean[k] = String(v)
+  }
+  return clean
+}
 
 interface ManagedTerminal {
   info: TerminalSessionInfo
@@ -339,7 +384,12 @@ export class TerminalManager {
     if (env.kind === 'ssh') {
       this.ensureHealthMonitor()
     }
-    void this.prepareAndSpawnPty(managed)
+    void this.prepareAndSpawnPty(managed).catch((err) => {
+      if (managed.closedByUser) return
+      managed.state = 'disconnected'
+      this.events.onData(managed.info.id, `\r\n\x1b[31mFailed to initialize terminal: ${err?.message || err}\x1b[0m\r\n`)
+      this.emitStatus(managed, { message: err?.message || 'Failed to initialize terminal' })
+    })
     return info
   }
 
@@ -706,17 +756,20 @@ export class TerminalManager {
     managed.state = env.kind === 'local' ? 'connected' : managed.isReattach ? 'reconnecting' : 'connecting'
     this.emitStatus(managed)
 
+    ensureNodePtySpawnHelperExecutable()
+
     const enrichedEnv = buildEnrichedEnv()
-    const ptyEnv = {
+    const ptyEnv = sanitizePtyEnv({
       ...enrichedEnv,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       LANG: process.env.LANG || 'en_US.UTF-8',
       MULTIPLEX_IDE: '1',
       MULTIPLEX_ENV_ID: env.id
-    }
+    })
 
-    let ptyProcess: pty.IPty
+    let ptyProcess: pty.IPty | null = null
+    let spawnErr: unknown = null
     try {
       ptyProcess = pty.spawn(file, args, {
         name: 'xterm-256color',
@@ -725,22 +778,41 @@ export class TerminalManager {
         cwd,
         env: ptyEnv
       })
-    } catch (err: any) {
+    } catch (err) {
+      spawnErr = err
       if (env.kind === 'local') {
-        ptyProcess = pty.spawn('/bin/zsh', ['-l'], {
-          name: 'xterm-256color',
-          cols,
-          rows,
-          cwd: os.homedir(),
-          env: ptyEnv
-        })
-      } else {
-        this.resolveTmuxAttachWaiters(managed)
-        managed.state = 'disconnected'
-        this.events.onData(managed.info.id, `\r\n\x1b[31mFailed to spawn SSH PTY: ${err?.message || err}\x1b[0m\r\n`)
-        this.emitStatus(managed, { message: err?.message || 'Failed to spawn SSH' })
-        return
+        for (const [fallbackShell, fallbackArgs] of [
+          ['/bin/zsh', ['-l']],
+          ['/bin/sh', []]
+        ] as Array<[string, string[]]>) {
+          try {
+            ptyProcess = pty.spawn(fallbackShell, fallbackArgs, {
+              name: 'xterm-256color',
+              cols,
+              rows,
+              cwd: os.homedir(),
+              env: ptyEnv
+            })
+            spawnErr = null
+            break
+          } catch (fallbackErr) {
+            spawnErr = fallbackErr
+          }
+        }
       }
+    }
+
+    if (!ptyProcess) {
+      const errMsg = (spawnErr as Error)?.message || String(spawnErr || 'Failed to spawn PTY')
+      this.resolveTmuxAttachWaiters(managed)
+      managed.state = 'disconnected'
+      this.events.onData(
+        managed.info.id,
+        `\r\n\x1b[31mFailed to spawn ${env.kind === 'local' ? 'local shell' : 'SSH'} PTY: ${errMsg}\x1b[0m\r\n` +
+          `\x1b[90m─── Press Enter to retry ───\x1b[0m\r\n`
+      )
+      this.emitStatus(managed, { message: errMsg })
+      return
     }
 
     managed.ptyProcess = ptyProcess
@@ -1134,12 +1206,8 @@ export class TerminalManager {
     if (!managed) return
     if (managed.ptyProcess) {
       managed.ptyProcess.write(data)
-    } else if (
-      managed.env.kind === 'ssh' &&
-      managed.state !== 'reconnecting' &&
-      (data === '\r' || data === '\n' || data === ' ')
-    ) {
-      // Pressing Enter or Space in a disconnected SSH pane immediately triggers in-place reconnect!
+    } else if (managed.state !== 'reconnecting' && (data === '\r' || data === '\n' || data === ' ')) {
+      // Pressing Enter or Space in a disconnected pane immediately triggers in-place reconnect/respawn!
       void this.reconnect(terminalId, { forceReset: false })
     }
   }

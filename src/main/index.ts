@@ -62,7 +62,16 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+        void shell.openExternal(url).catch((err) => {
+          console.warn('[MultiplexIDE] Failed to open external URL:', url, err?.message || err)
+        })
+      }
+    } catch {
+      // Ignore malformed/non-standard links detected in terminal output
+    }
     return { action: 'deny' }
   })
 
