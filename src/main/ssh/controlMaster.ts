@@ -37,16 +37,69 @@ export function buildEnrichedEnv(): NodeJS.ProcessEnv {
   }
 }
 
+export interface SshConnectResult {
+  ok: boolean
+  needsInteractiveAuth?: boolean
+  nonRetryable?: boolean
+  error?: string
+}
+
+const AUTH_HINT_RE =
+  /permission denied|keyboard-interactive|passphrase|password|verification code|two-factor|2fa|otp|enter pin/i
+const NON_RETRYABLE_SSH_RE =
+  /host key verification failed|offending .* key|remote host identification has changed|bad configuration option|invalid argument/i
+
+export function classifySshError(stderr: string): {
+  needsInteractiveAuth: boolean
+  nonRetryable: boolean
+} {
+  const text = stderr || ''
+  if (NON_RETRYABLE_SSH_RE.test(text)) {
+    return { needsInteractiveAuth: false, nonRetryable: true }
+  }
+  if (AUTH_HINT_RE.test(text)) {
+    return { needsInteractiveAuth: true, nonRetryable: false }
+  }
+  return { needsInteractiveAuth: false, nonRetryable: false }
+}
+
+/**
+ * Parses `Master running (pid=12345)` emitted by `ssh -O check`.
+ */
+export function parseControlMasterPid(output: string): number | null {
+  const m = /Master running\s*\(pid=(\d+)\)/i.exec(output || '')
+  if (!m) return null
+  const pid = parseInt(m[1], 10)
+  return Number.isFinite(pid) && pid > 1 ? pid : null
+}
+
+function resolveShortControlDir(baseDir?: string): string {
+  if (baseDir) return baseDir
+  const uid = process.getuid?.() ?? 'u'
+  // Prefer `/tmp/mide-ssh-<uid>` (~17 bytes) over macOS `os.tmpdir()` (`/var/folders/.../T`, ~49 bytes)
+  // because macOS Unix domain socket paths cap at 104 bytes AND OpenSSH appends a 17-byte temp suffix!
+  const preferred = `/tmp/mide-ssh-${uid}`
+  try {
+    fs.mkdirSync(preferred, { recursive: true, mode: 0o700 })
+    return preferred
+  } catch {
+    const fallback = path.join(os.tmpdir(), `mide-ssh-${uid}`)
+    fs.mkdirSync(fallback, { recursive: true, mode: 0o700 })
+    return fallback
+  }
+}
+
 export class SshControlMaster {
   private ctlDir: string
   private homeCache = new Map<string, string>()
   private resetLocks = new Map<string, Promise<void>>()
-  private connectLocks = new Map<string, Promise<{ ok: boolean; needsInteractiveAuth?: boolean; error?: string }>>()
+  private connectLocks = new Map<string, Promise<SshConnectResult>>()
+  private verifyLocks = new Map<string, Promise<boolean>>()
   private lastResetAt = new Map<string, number>()
+  private lastConnectedAt = new Map<string, number>()
 
   constructor(baseDir?: string) {
-    // Keep socket path short! macOS Unix domain socket max path length is 104 bytes.
-    this.ctlDir = baseDir ?? path.join(os.tmpdir(), `mide-ssh-${process.getuid?.() ?? 'u'}`)
+    this.ctlDir = resolveShortControlDir(baseDir)
     fs.mkdirSync(this.ctlDir, { recursive: true, mode: 0o700 })
   }
 
@@ -55,22 +108,27 @@ export class SshControlMaster {
     return path.join(this.ctlDir, `ctl-${hash}`)
   }
 
-  buildBaseSshArgs(env: Environment, opts?: { interactive?: boolean; batchMode?: boolean }): string[] {
+  buildBaseSshArgs(
+    env: Environment,
+    opts?: { interactive?: boolean; batchMode?: boolean; reuseOnly?: boolean }
+  ): string[] {
     const ctlPath = this.getControlPath(env)
     const args: string[] = [
       '-o', `ControlPath=${ctlPath}`,
-      '-o', 'ControlMaster=auto',
+      '-o', opts?.reuseOnly ? 'ControlMaster=no' : 'ControlMaster=auto',
       '-o', 'ControlPersist=600',
-      '-o', 'ServerAliveInterval=10',
-      '-o', 'ServerAliveCountMax=2',
+      // 15s × 3 = 45s tolerance: absorbs transient corporate VPN / ProxyCommand hiccups without
+      // dropping every tab, while still catching genuinely dead connections promptly!
+      '-o', 'ServerAliveInterval=15',
+      '-o', 'ServerAliveCountMax=3',
       '-o', 'TCPKeepAlive=yes'
     ]
 
     if (opts?.batchMode) {
-      args.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10')
+      args.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20')
     } else {
-      // Bound connect timeout on interactive terminals too so dead Wi-Fi/VPN fails fast instead of hanging 75s
-      args.push('-o', 'ConnectTimeout=12')
+      // Bound connect timeout generously enough for ProxyCommand / ProxyJump gateways (12-18s cold dial)
+      args.push('-o', 'ConnectTimeout=20')
     }
 
     if (env.source !== 'ssh-config') {
@@ -99,26 +157,81 @@ export class SshControlMaster {
     return hostPart
   }
 
-  async isConnected(env: Environment): Promise<boolean> {
-    if (env.kind === 'local') return true
+  /**
+   * Checks local ControlMaster process liveness via `ssh -O check` and returns its PID if running.
+   * NOTE: This only proves the LOCAL mux process exists — use `verifyEndToEnd()` to prove the remote
+   * tunnel/ProxyCommand is not wedged or half-open!
+   */
+  async getMasterPid(env: Environment): Promise<number | null> {
+    if (env.kind === 'local') return null
     const ctlPath = this.getControlPath(env)
-    if (!fs.existsSync(ctlPath)) return false
+    if (!fs.existsSync(ctlPath)) return null
 
     return new Promise((resolve) => {
       execFile(
         '/usr/bin/ssh',
         ['-O', 'check', '-o', `ControlPath=${ctlPath}`, this.getSshDestination(env)],
         { timeout: 3000, env: buildEnrichedEnv() },
-        (err) => resolve(!err)
+        (err, stdout, stderr) => {
+          if (err) {
+            resolve(null)
+            return
+          }
+          resolve(parseControlMasterPid(`${stdout}\n${stderr}`) ?? -1)
+        }
       )
     })
   }
 
+  async isConnected(env: Environment): Promise<boolean> {
+    if (env.kind === 'local') return true
+    const pid = await this.getMasterPid(env)
+    return pid !== null
+  }
+
   /**
-   * Tears down a stale or dead ControlMaster socket (critical after macOS sleep/wake or VPN changes
-   * so reconnecting terminals don't hang on a half-open dead socket!).
-   * Serialized & deduplicated per environment so multi-tab / multi-split reconnects NEVER kill
-   * a fresh socket just established by a sibling pane!
+   * Proves the existing ControlMaster socket can actually reach the remote sshd end-to-end
+   * (`-o ControlMaster=no` guarantees this NEVER dials a brand-new SSH connection!).
+   * Deduplicated per env so concurrent callers share a single fast (~30ms) probe.
+   */
+  async verifyEndToEnd(env: Environment, timeoutMs = 5000): Promise<boolean> {
+    if (env.kind === 'local') return true
+    const ctlPath = this.getControlPath(env)
+    if (!fs.existsSync(ctlPath)) return false
+
+    const existing = this.verifyLocks.get(env.id)
+    if (existing) return existing
+
+    const task = (async (): Promise<boolean> => {
+      const pid = await this.getMasterPid(env)
+      if (pid === null) return false
+
+      try {
+        const res = await this.exec(env, 'printf __MIDE_ALIVE__', {
+          timeoutMs,
+          batchMode: true,
+          reuseOnly: true
+        })
+        return res.code === 0 && res.stdout.includes('__MIDE_ALIVE__')
+      } catch {
+        return false
+      }
+    })()
+
+    this.verifyLocks.set(env.id, task)
+    try {
+      return await task
+    } finally {
+      if (this.verifyLocks.get(env.id) === task) {
+        this.verifyLocks.delete(env.id)
+      }
+    }
+  }
+
+  /**
+   * Tears down a stale, wedged, or dead ControlMaster socket (including terminating a hung local
+   * mux PID when `ssh -O exit` times out!).
+   * Serialized & deduplicated per environment so sibling tabs never collide.
    */
   async resetControlSocket(env: Environment, opts?: { force?: boolean }): Promise<void> {
     if (env.kind === 'local') return
@@ -136,14 +249,16 @@ export class SshControlMaster {
       if (sinceLast < 3500) {
         return
       }
-      // Double-check if a sibling pane already brought the master back online
-      if (await this.isConnected(env)) {
+      // Only skip non-forced reset if end-to-end tunnel is genuinely responsive
+      if (await this.verifyEndToEnd(env, 3500)) {
         return
       }
     }
 
     const task = (async () => {
       this.lastResetAt.set(env.id, Date.now())
+      const masterPid = await this.getMasterPid(env).catch(() => null)
+
       await new Promise<void>((resolve) => {
         execFile(
           '/usr/bin/ssh',
@@ -152,6 +267,28 @@ export class SshControlMaster {
           () => resolve()
         )
       })
+
+      // If `ssh -O exit` couldn't stop a wedged mux process (e.g. hung ProxyCommand), terminate its PID cleanly
+      if (masterPid && masterPid > 1) {
+        try {
+          process.kill(masterPid, 0) // throws ESRCH if already exited
+          try {
+            process.kill(masterPid, 'SIGTERM')
+          } catch {
+            // ignore race
+          }
+          await new Promise((r) => setTimeout(r, 150))
+          try {
+            process.kill(masterPid, 0)
+            process.kill(masterPid, 'SIGKILL')
+          } catch {
+            // already exited
+          }
+        } catch {
+          // already exited cleanly
+        }
+      }
+
       try {
         if (fs.existsSync(ctlPath)) fs.unlinkSync(ctlPath)
       } catch {
@@ -170,44 +307,78 @@ export class SshControlMaster {
   }
 
   /**
-   * Ensures a leftover dead socket file never blocks interactive `ControlMaster=auto` spawning.
+   * Ensures a leftover dead or half-open wedged socket never poisons subsequent SSH sessions.
    */
   async cleanIfDeadSocket(env: Environment): Promise<void> {
     if (env.kind === 'local') return
     const ctlPath = this.getControlPath(env)
     if (!fs.existsSync(ctlPath)) return
-    const alive = await this.isConnected(env)
-    if (!alive) {
-      await this.resetControlSocket(env)
+    const healthy = await this.verifyEndToEnd(env, 4000)
+    if (!healthy) {
+      await this.resetControlSocket(env, { force: true })
     }
+  }
+
+  /**
+   * Coordinates ONE healthy end-to-end ControlMaster per environment across all panes & SFTP:
+   * - If a sibling pane ALREADY connected a fresh master within `allowReuseRecentMs` (e.g. 6000ms
+   *   during multi-tab auto-reconnect) and `verifyEndToEnd()` succeeds, reuses it immediately so a
+   *   lagging sibling tab NEVER tears down a brand-new master!
+   * - If `forceReset` is true otherwise, tears down any wedged master first and dials ONE fresh connection.
+   * - Otherwise, reuses an existing master ONLY if end-to-end `verifyEndToEnd()` succeeds; if wedged,
+   *   automatically tears it down and dials ONE fresh connection (shared across all waiting panes!).
+   */
+  async ensureHealthyMaster(
+    env: Environment,
+    opts?: { forceReset?: boolean; allowReuseRecentMs?: number }
+  ): Promise<SshConnectResult> {
+    if (env.kind === 'local') return { ok: true }
+
+    // If a connect attempt is already in progress for this env, join it rather than piling on!
+    const inFlight = this.connectLocks.get(env.id)
+    if (inFlight) {
+      return inFlight
+    }
+
+    const recentOk =
+      opts?.allowReuseRecentMs !== undefined &&
+      Date.now() - (this.lastConnectedAt.get(env.id) || 0) < opts.allowReuseRecentMs
+
+    if (!opts?.forceReset || recentOk) {
+      if (await this.verifyEndToEnd(env, 4500)) {
+        return { ok: true }
+      }
+    }
+
+    return this.connect(env, { forceReset: true })
   }
 
   async ensureConnected(env: Environment): Promise<boolean> {
     if (env.kind === 'local') return true
-    if (await this.isConnected(env)) return true
-    const res = await this.connect(env)
+    const res = await this.ensureHealthyMaster(env)
     return res.ok
   }
 
   /**
    * Connects like VS Code Remote-SSH:
-   * 1. Cleans up any stale control socket if check failed.
-   * 2. Attempts `-f -N` ControlMaster bootstrap (works for standard OpenSSH hosts).
-   * 3. Falls back to `ssh <baseArgs> <dest> 'printf __MIDE_OK__'` for bastion / container gateways
+   * 1. Deduplicated per environment via `connectLocks` so multiple tabs / SFTP / sidebar never race.
+   * 2. Tears down any stale/wedged control socket before fresh dial.
+   * 3. Attempts `-f -N` ControlMaster bootstrap (works for standard OpenSSH hosts).
+   * 4. Falls back to `ssh <baseArgs> -T <dest> 'printf __MIDE_OK__'` for bastion / container gateways
    *    whose ProxyCommand or sshd rejects `-N` without an exec channel!
    */
-  async connect(env: Environment): Promise<{ ok: boolean; needsInteractiveAuth?: boolean; error?: string }> {
+  async connect(env: Environment, opts?: { forceReset?: boolean }): Promise<SshConnectResult> {
     if (env.kind === 'local') return { ok: true }
-    if (await this.isConnected(env)) return { ok: true }
+    if (!opts?.forceReset && (await this.verifyEndToEnd(env, 4000))) {
+      return { ok: true }
+    }
 
-    // Deduplicate concurrent connect() calls per environment so sidebar click, file tree,
-    // and terminal bootstrap never race or reset each other's fresh ControlMaster socket!
     const existingConnect = this.connectLocks.get(env.id)
     if (existingConnect) {
       return existingConnect
     }
 
-    const task = this.connectInternal(env)
+    const task = this.connectInternal(env, Boolean(opts?.forceReset))
     this.connectLocks.set(env.id, task)
     try {
       return await task
@@ -218,13 +389,13 @@ export class SshControlMaster {
     }
   }
 
-  private async connectInternal(
-    env: Environment
-  ): Promise<{ ok: boolean; needsInteractiveAuth?: boolean; error?: string }> {
-    if (await this.isConnected(env)) return { ok: true }
+  private async connectInternal(env: Environment, forceReset: boolean): Promise<SshConnectResult> {
+    if (!forceReset && (await this.verifyEndToEnd(env, 4000))) {
+      return { ok: true }
+    }
 
-    // Clear stale socket file before fresh dial
-    await this.resetControlSocket(env)
+    // Clear stale/wedged socket file & hung mux PID before fresh dial
+    await this.resetControlSocket(env, { force: true })
 
     const envVars = buildEnrichedEnv()
     const dest = this.getSshDestination(env)
@@ -246,8 +417,8 @@ export class SshControlMaster {
         child.stderr.on('data', (c) => (stderr += c.toString()))
         const timer = setTimeout(() => {
           child.kill('SIGTERM')
-          resolve({ code: 124, stdout, stderr: stderr || 'SSH connection timed out' })
-        }, 15000)
+          resolve({ code: 124, stdout, stderr: stderr || 'SSH connection timed out (22s)' })
+        }, 22_000)
 
         child.on('exit', (code) => {
           clearTimeout(timer)
@@ -261,13 +432,30 @@ export class SshControlMaster {
 
     // Try 1: Fast background master (-f -N)
     const first = await runProbe(['-f', '-N'])
-    if (first.code === 0) return { ok: true }
+    if (first.code === 0) {
+      this.lastConnectedAt.set(env.id, Date.now())
+      return { ok: true }
+    }
 
-    const authHint = (text: string) =>
-      /permission denied|keyboard-interactive|passphrase|password|verification code|host key verification/i.test(text)
+    const firstClass = classifySshError(first.stderr)
+    if (firstClass.needsInteractiveAuth || firstClass.nonRetryable) {
+      return {
+        ok: false,
+        needsInteractiveAuth: firstClass.needsInteractiveAuth,
+        nonRetryable: firstClass.nonRetryable,
+        error: first.stderr.trim() || `SSH exited with code ${first.code}`
+      }
+    }
 
-    if (authHint(first.stderr)) {
-      return { ok: false, needsInteractiveAuth: true, error: first.stderr.trim() }
+    // If Try 1 failed due to transport timeout/refusal/proxy failure, don't burn another 22s on Try 2!
+    if (
+      first.code === 124 ||
+      /timed out|connection refused|could not resolve|network is unreachable|no route to host/i.test(first.stderr)
+    ) {
+      return {
+        ok: false,
+        error: first.stderr.trim() || `SSH exited with code ${first.code}`
+      }
     }
 
     // Try 2: Exec probe (compatible with container / bastion proxies that disallow `-N`)
@@ -277,13 +465,16 @@ export class SshControlMaster {
       stderr: ''
     }))
     if (second.code === 0 && second.stdout.includes('__MIDE_OK__')) {
+      this.lastConnectedAt.set(env.id, Date.now())
       return { ok: true }
     }
 
     const errMsg = (second.stderr || first.stderr).trim() || `SSH exited with code ${first.code}`
+    const secondClass = classifySshError(errMsg)
     return {
       ok: false,
-      needsInteractiveAuth: authHint(errMsg),
+      needsInteractiveAuth: secondClass.needsInteractiveAuth,
+      nonRetryable: secondClass.nonRetryable,
       error: errMsg
     }
   }
@@ -297,10 +488,20 @@ export class SshControlMaster {
   async exec(
     env: Environment,
     remoteCommand: string,
-    opts?: { timeoutMs?: number; batchMode?: boolean }
+    opts?: { timeoutMs?: number; batchMode?: boolean; reuseOnly?: boolean }
   ): Promise<{ stdout: string; stderr: string; code: number }> {
+    if (opts?.reuseOnly) {
+      const ctlPath = this.getControlPath(env)
+      if (!fs.existsSync(ctlPath)) {
+        return { stdout: '', stderr: 'No active ControlMaster socket', code: 255 }
+      }
+    }
+
     const args = [
-      ...this.buildBaseSshArgs(env, { batchMode: opts?.batchMode ?? true }),
+      ...this.buildBaseSshArgs(env, {
+        batchMode: opts?.batchMode ?? true,
+        reuseOnly: opts?.reuseOnly
+      }),
       this.getSshDestination(env),
       remoteCommand
     ]

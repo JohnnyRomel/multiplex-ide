@@ -13,10 +13,11 @@ import type {
 import { expandLocalTilde } from '../ssh/configParser'
 import { buildEnrichedEnv, type SshControlMaster } from '../ssh/controlMaster'
 
-// Covers >2.5 minutes of server reboot / VPN switch / Wi-Fi roam with progressive backoff
-const RECONNECT_BACKOFF_MS = [1500, 2500, 4000, 6000, 9000, 12000, 15000, 20000, 25000, 30000]
+// Progressive backoff covering ~100s of VPN roam / gateway hiccup / server reboot without hammering proxies
+const RECONNECT_BACKOFF_MS = [2000, 3500, 5000, 8000, 12000, 16000, 22000, 30000]
 const DEFAULT_RECENT_TMUX_MAX_AGE_SEC = 3600
-const HEALTH_CHECK_INTERVAL_MS = 18_000
+const HEALTH_CHECK_INTERVAL_MS = 25_000
+const STABLE_CONNECTION_RESET_MS = 10_000
 const IDLE_SHELL_COMMANDS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'csh', 'tcsh'])
 
 let checkedSpawnHelperPerms = false
@@ -63,15 +64,35 @@ function sanitizePtyEnv(rawEnv: NodeJS.ProcessEnv): Record<string, string> {
   return clean
 }
 
+function summarizeSshError(raw?: string): string {
+  if (!raw) return 'SSH connection failed'
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('** '))
+  const picked = lines[lines.length - 1] || lines[0] || raw.trim()
+  return picked.length > 140 ? `${picked.slice(0, 137)}...` : picked
+}
+
+/**
+ * Detects tmux's client-detach notice (`[detached (from session ...)]`) so an intentional detach
+ * or another pane taking over the session via `attach-session -d` NEVER triggers a ping-pong loop!
+ */
+export function isTmuxDetachOutput(outputTail: string): boolean {
+  return /\[detached(?:\s+\(from session [^)]+\))?\]/i.test(outputTail || '')
+}
+
 interface ManagedTerminal {
   info: TerminalSessionInfo
   ptyProcess: pty.IPty | null
   env: Environment
   options: TerminalCreateOptions
   oscBuffer: string
+  recentOutputTail: string
   tmuxSession?: string
   attachRecentPending: boolean
   awaitingTmuxAttach: boolean
+  awaitingInteractiveAuth: boolean
   tmuxAttachWaiters: Array<() => void>
   state: TerminalStatusEvent['state']
   closedByUser: boolean
@@ -79,6 +100,7 @@ interface ManagedTerminal {
   reconnectAttempt: number
   reconnectTimer: NodeJS.Timeout | null
   sshCheckTimer: NodeJS.Timeout | null
+  stableTimer: NodeJS.Timeout | null
   postAttachResizeTimers: NodeJS.Timeout[]
   lastSpawnAt: number
   isReattach: boolean
@@ -315,12 +337,12 @@ export function buildRemoteTmuxBootstrapCommand(
 }
 
 /**
- * Manages local & SSH terminals with cmux-style seamless disconnect/reconnect:
- * - Each terminal pane retains its stable `terminalId` and xterm scrollback across disconnects.
- * - SSH panes automatically use a dedicated per-pane remote `tmux` session (`mide_<shortId>`, status bar hidden)
- *   when `tmux` is available on the host, so running commands, cwd, and processes survive network drops & Mac sleep!
- * - Automatic exponential-backoff reconnect + instant manual reconnect + macOS wake-from-sleep reconnect
- *   + periodic SSH ControlMaster health heartbeat + interactive tmux session switching.
+ * Manages local & SSH terminals with coordinated, cmux-style disconnect/reconnect:
+ * - Separates SSH transport (`ControlMaster`) recovery from individual pane re-attach so multiple
+ *   tabs/splits on the same host share ONE end-to-end verified ControlMaster handshake (zero thundering herd!).
+ * - Never resets reconnect backoff on a stale local mux socket — only resets after real stable uptime.
+ * - Detects tmux client detaches (`[detached ...]`) to prevent ping-pong detach/reconnect fights.
+ * - Runs a periodic end-to-end SSH health check to detect silent half-open ProxyCommand/VPN drops.
  */
 export class TerminalManager {
   private sessions = new Map<string, ManagedTerminal>()
@@ -364,9 +386,11 @@ export class TerminalManager {
       env,
       options: { ...options, cols, rows, useTmux },
       oscBuffer: '',
+      recentOutputTail: '',
       tmuxSession,
       attachRecentPending,
       awaitingTmuxAttach: attachRecentPending,
+      awaitingInteractiveAuth: false,
       tmuxAttachWaiters: [],
       state: env.kind === 'local' ? 'connected' : 'connecting',
       closedByUser: false,
@@ -374,6 +398,7 @@ export class TerminalManager {
       reconnectAttempt: 0,
       reconnectTimer: null,
       sshCheckTimer: null,
+      stableTimer: null,
       postAttachResizeTimers: [],
       lastSpawnAt: 0,
       isReattach: Boolean(explicitTmux),
@@ -400,7 +425,19 @@ export class TerminalManager {
     for (const fn of waiters) fn()
   }
 
-  private clearPostAttachResizeTimers(managed: ManagedTerminal): void {
+  private clearPaneTimers(managed: ManagedTerminal): void {
+    if (managed.reconnectTimer) {
+      clearTimeout(managed.reconnectTimer)
+      managed.reconnectTimer = null
+    }
+    if (managed.sshCheckTimer) {
+      clearInterval(managed.sshCheckTimer)
+      managed.sshCheckTimer = null
+    }
+    if (managed.stableTimer) {
+      clearTimeout(managed.stableTimer)
+      managed.stableTimer = null
+    }
     for (const t of managed.postAttachResizeTimers) clearTimeout(t)
     managed.postAttachResizeTimers = []
   }
@@ -445,7 +482,7 @@ export class TerminalManager {
       `tmux list-sessions -F '#{session_name}\t#{session_activity}\t#{session_attached}\t#{pane_current_command}\t#{pane_current_path}\t#{session_windows}\t#{window_width}x#{window_height}' 2>/dev/null || true; ` +
       `fi`
     try {
-      const res = await this.controlMaster.exec(env, probeCmd, { timeoutMs: 5000 })
+      const res = await this.controlMaster.exec(env, probeCmd, { timeoutMs: 5000, reuseOnly: true })
       const owned = this.getOwnedTmuxSessions(env.id)
       return parseTmuxSessionsOutput(res.stdout, owned)
     } catch {
@@ -492,7 +529,7 @@ export class TerminalManager {
       `fi`
 
     try {
-      const res = await this.controlMaster.exec(env, probeCmd, { timeoutMs: 5000 })
+      const res = await this.controlMaster.exec(env, probeCmd, { timeoutMs: 5000, reuseOnly: true })
       const owned = this.getOwnedTmuxSessions(env.id)
       return parseRecoverableTmuxOutput(res.stdout, maxAgeSec, owned).slice(0, 6)
     } catch {
@@ -503,6 +540,8 @@ export class TerminalManager {
   /**
    * Switches an SSH terminal pane IN-PLACE to a specific remote tmux session (or a brand-new
    * clean `mide_*` session when `targetSession` is omitted / `'__new__'`), avoiding nested `tmux a`!
+   * If another pane in this app currently holds `targetSession`, pauses that pane cleanly so `-d`
+   * never triggers a ping-pong reconnect fight!
    */
   async switchTmuxSession(terminalId: string, targetSession?: string): Promise<string | undefined> {
     const managed = this.sessions.get(terminalId)
@@ -515,6 +554,15 @@ export class TerminalManager {
 
     if (!nextSession || !/^[a-zA-Z0-9_.-]+$/.test(nextSession)) {
       return managed.tmuxSession
+    }
+
+    // Prevent ping-pong detach loop if another open pane in this IDE owns the same tmux session
+    if (!isFresh) {
+      for (const [otherId, other] of this.sessions) {
+        if (otherId !== terminalId && other.env.id === managed.env.id && other.tmuxSession === nextSession) {
+          this.pauseReconnect(otherId)
+        }
+      }
     }
 
     managed.attachRecentPending = false
@@ -544,7 +592,7 @@ export class TerminalManager {
       const res = await this.controlMaster.exec(
         env,
         `tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null`,
-        { timeoutMs: 4000 }
+        { timeoutMs: 4000, reuseOnly: true }
       )
       return res.code === 0
     } catch {
@@ -565,7 +613,7 @@ export class TerminalManager {
 
     const killCmd = stale.map((s) => `tmux kill-session -t ${shellQuote(s.name)} 2>/dev/null || true`).join('; ')
     try {
-      await this.controlMaster.exec(env, killCmd, { timeoutMs: 5000 })
+      await this.controlMaster.exec(env, killCmd, { timeoutMs: 5000, reuseOnly: true })
       return stale.length
     } catch {
       return 0
@@ -594,14 +642,15 @@ export class TerminalManager {
     try {
       const now = Date.now()
       const connectedByEnv = new Map<string, ManagedTerminal[]>()
+      const busyEnvs = new Set<string>()
+
       for (const sess of this.sessions.values()) {
-        if (
-          sess.env.kind === 'ssh' &&
-          !sess.closedByUser &&
-          !sess.reconnectPaused &&
-          sess.state === 'connected' &&
-          now - sess.lastSpawnAt > 12_000
-        ) {
+        if (sess.env.kind !== 'ssh' || sess.closedByUser) continue
+        if (sess.state === 'reconnecting' || sess.state === 'connecting' || sess.awaitingInteractiveAuth) {
+          busyEnvs.add(sess.env.id)
+          continue
+        }
+        if (!sess.reconnectPaused && sess.state === 'connected' && now - sess.lastSpawnAt > 15_000) {
           const list = connectedByEnv.get(sess.env.id) || []
           list.push(sess)
           connectedByEnv.set(sess.env.id, list)
@@ -609,9 +658,10 @@ export class TerminalManager {
       }
 
       for (const [envId, panes] of connectedByEnv) {
+        if (busyEnvs.has(envId)) continue
         const env = panes[0].env
-        const alive = await this.controlMaster.isConnected(env)
-        if (alive) {
+        const healthy = await this.controlMaster.verifyEndToEnd(env, 4500)
+        if (healthy) {
           this.envHealthFailures.delete(envId)
           continue
         }
@@ -620,11 +670,12 @@ export class TerminalManager {
         if (fails >= 2) {
           this.envHealthFailures.delete(envId)
           this.events.onSshDisconnected?.(envId)
-          await this.controlMaster.resetControlSocket(env).catch(() => {})
+          // Tear down the half-open master ONCE, then let coordinated reconnect bring all panes back
+          await this.controlMaster.resetControlSocket(env, { force: true }).catch(() => {})
           for (let i = 0; i < panes.length; i++) {
             const p = panes[i]
             if (p.closedByUser || p.reconnectPaused || p.state !== 'connected') continue
-            if (i > 0) await new Promise((r) => setTimeout(r, 180))
+            if (i > 0) await new Promise((r) => setTimeout(r, 200))
             void this.reconnect(p.info.id, { forceReset: false })
           }
         }
@@ -676,7 +727,8 @@ export class TerminalManager {
    * with stale dimensions (causing wrapped borders & misaligned cursor/input!).
    */
   private schedulePostAttachSizeSync(managed: ManagedTerminal, ptyProcess: pty.IPty): void {
-    this.clearPostAttachResizeTimers(managed)
+    for (const t of managed.postAttachResizeTimers) clearTimeout(t)
+    managed.postAttachResizeTimers = []
     const t1 = setTimeout(() => {
       if (managed.closedByUser || managed.ptyProcess !== ptyProcess) return
       const cols = managed.info.cols
@@ -704,20 +756,13 @@ export class TerminalManager {
 
   private spawnPty(managed: ManagedTerminal): void {
     if (managed.closedByUser) return
-    if (managed.reconnectTimer) {
-      clearTimeout(managed.reconnectTimer)
-      managed.reconnectTimer = null
-    }
-    if (managed.sshCheckTimer) {
-      clearInterval(managed.sshCheckTimer)
-      managed.sshCheckTimer = null
-    }
-    this.clearPostAttachResizeTimers(managed)
+    this.clearPaneTimers(managed)
 
     const { env, options } = managed
     const spawnGen = managed.spawnGeneration
     const cols = managed.info.cols || 100
     const rows = managed.info.rows || 30
+    managed.recentOutputTail = ''
 
     let file: string
     let args: string[]
@@ -816,7 +861,7 @@ export class TerminalManager {
     }
 
     managed.ptyProcess = ptyProcess
-    // Apply latest terminal dimensions if UI fitted while prepareAndSpawnPty was awaiting
+    // Apply latest terminal dimensions if UI fitted while preparing PTY
     if (managed.info.cols !== cols || managed.info.rows !== rows) {
       try {
         ptyProcess.resize(managed.info.cols, managed.info.rows)
@@ -825,19 +870,38 @@ export class TerminalManager {
       }
     }
 
+    // ONLY reset backoff counter after the PTY genuinely stays alive and healthy for 10 seconds!
+    // (Never reset inside checkReady, which could see a stale local mux socket and cause infinite 1/N loops!)
+    if (env.kind === 'ssh') {
+      managed.stableTimer = setTimeout(() => {
+        if (managed.closedByUser || managed.ptyProcess !== ptyProcess) return
+        managed.reconnectAttempt = 0
+        managed.awaitingInteractiveAuth = false
+      }, STABLE_CONNECTION_RESET_MS)
+    }
+
     let notifiedSshReady = env.kind === 'local'
+    let receivedRemoteData = false
     let checking = false
+    const markSshPaneConnected = () => {
+      if (notifiedSshReady || managed.closedByUser || managed.ptyProcess !== ptyProcess) return
+      notifiedSshReady = true
+      this.envHealthFailures.delete(env.id)
+      managed.state = 'connected'
+      managed.awaitingInteractiveAuth = false
+      this.emitStatus(managed)
+      this.events.onSshConnected(env.id)
+    }
+
     const checkReady = async () => {
       if (notifiedSshReady || checking || managed.closedByUser || managed.ptyProcess !== ptyProcess) return
+      // Require either tmux OSC 9991 confirmation OR actual remote output + >800ms uptime before marking connected
+      // so a fast-failing channel on a stale mux socket never flashes false "connected"!
+      if (!receivedRemoteData && Date.now() - managed.lastSpawnAt < 1800) return
       checking = true
       try {
         if (await this.controlMaster.isConnected(env)) {
-          notifiedSshReady = true
-          this.envHealthFailures.delete(env.id)
-          managed.state = 'connected'
-          managed.reconnectAttempt = 0
-          this.emitStatus(managed)
-          this.events.onSshConnected(env.id)
+          markSshPaneConnected()
         }
       } finally {
         checking = false
@@ -845,13 +909,17 @@ export class TerminalManager {
     }
 
     if (env.kind === 'ssh') {
-      managed.sshCheckTimer = setInterval(checkReady, 1800)
+      managed.sshCheckTimer = setInterval(checkReady, 2000)
     }
 
     ptyProcess.onData((rawData) => {
       if (managed.ptyProcess !== ptyProcess) return
+      receivedRemoteData = true
       // Strip ESC[3J on SSH sessions so tmux re-attach never wipes local scrollback
       let data = env.kind === 'ssh' ? stripEraseScrollback(rawData) : rawData
+
+      // Keep small rolling tail for detecting intentional `[detached (from session ...)]`
+      managed.recentOutputTail = (managed.recentOutputTail + data).slice(-512)
 
       // Parse hidden OSC 9991 marker emitted right before `exec tmux -u attach-session -d`
       // so we record the exact remote tmux session name & sync PTY dimensions cleanly!
@@ -865,10 +933,12 @@ export class TerminalManager {
           managed.attachRecentPending = false
           this.resolveTmuxAttachWaiters(managed)
           this.schedulePostAttachSizeSync(managed, ptyProcess)
-          this.emitStatus(
-            managed,
-            wasAutoRecovered ? { message: `Reattached active tmux session (${sessionName}) on ${env.name}` } : undefined
-          )
+          markSshPaneConnected()
+          if (wasAutoRecovered) {
+            this.emitStatus(managed, {
+              message: `Reattached active tmux session (${sessionName}) on ${env.name}`
+            })
+          }
         }
       }
 
@@ -876,14 +946,8 @@ export class TerminalManager {
         this.events.onData(managed.info.id, data)
       }
 
-      if (env.kind === 'ssh') {
-        if (managed.state !== 'connected' && Date.now() - managed.lastSpawnAt > 350) {
-          void checkReady()
-        }
-        // Reset backoff counter once session stays healthy for > 8 seconds
-        if (managed.reconnectAttempt > 0 && Date.now() - managed.lastSpawnAt > 8000) {
-          managed.reconnectAttempt = 0
-        }
+      if (env.kind === 'ssh' && managed.state !== 'connected' && Date.now() - managed.lastSpawnAt > 800) {
+        void checkReady()
       }
 
       if (data.includes('\x1b]')) {
@@ -911,11 +975,7 @@ export class TerminalManager {
     ptyProcess.onExit(({ exitCode }) => {
       // Ignore exit from an older PTY replaced by manual reconnect() / switchTmuxSession()
       if (managed.ptyProcess !== ptyProcess) return
-      if (managed.sshCheckTimer) {
-        clearInterval(managed.sshCheckTimer)
-        managed.sshCheckTimer = null
-      }
-      this.clearPostAttachResizeTimers(managed)
+      this.clearPaneTimers(managed)
       this.resolveTmuxAttachWaiters(managed)
       managed.ptyProcess = null
 
@@ -934,10 +994,9 @@ export class TerminalManager {
       }
 
       // SSH terminal exited: NEVER destroy the pane or clear xterm scrollback!
-      // Verify ControlMaster liveness FIRST so a network/proxy drop returning exit 0
-      // is NEVER misclassified as a clean user shell exit!
       const livedMs = Date.now() - managed.lastSpawnAt
-      void this.handleSshPtyExit(managed, spawnGen, exitCode, livedMs)
+      const detachedByTmux = isTmuxDetachOutput(managed.recentOutputTail)
+      void this.handleSshPtyExit(managed, spawnGen, exitCode, livedMs, detachedByTmux)
     })
   }
 
@@ -945,64 +1004,107 @@ export class TerminalManager {
     managed: ManagedTerminal,
     spawnGen: number,
     exitCode: number,
-    livedMs: number
+    livedMs: number,
+    detachedByTmux: boolean
   ): Promise<void> {
-    const masterAlive = await this.controlMaster.isConnected(managed.env).catch(() => false)
+    // Verify REAL end-to-end reachability (not just local mux PID!) so a wedged/half-open
+    // ControlMaster is detected immediately and NEVER misclassified as healthy or clean exit!
+    const masterHealthy = await this.controlMaster.verifyEndToEnd(managed.env, 3500).catch(() => false)
 
-    // Guard against concurrent reconnect() / close() while awaiting master check
+    // Guard against concurrent reconnect() / close() while awaiting health probe
     if (managed.closedByUser || managed.spawnGeneration !== spawnGen || managed.ptyProcess !== null) {
       return
     }
 
-    if (!masterAlive) {
+    if (!masterHealthy) {
       this.events.onSshDisconnected?.(managed.env.id)
     }
 
-    const cleanUserExit = masterAlive && exitCode === 0 && livedMs > 3000
+    if (managed.reconnectPaused) {
+      managed.state = 'disconnected'
+      this.emitStatus(managed, { exitCode, message: 'Reconnect paused — press Enter or ↻' })
+      return
+    }
 
-    if (cleanUserExit || managed.reconnectPaused) {
+    // Intentional tmux detach (`C-b d`) or another pane took over this tmux session with `-d`:
+    // NEVER auto-reconnect in a loop or the two panes will ping-pong detach each other!
+    if (masterHealthy && detachedByTmux && exitCode === 0) {
       managed.state = 'disconnected'
       this.events.onData(
         managed.info.id,
-        `\r\n\x1b[90m─── Session ended (exit ${exitCode ?? 0}). Press Enter or click ↻ to reconnect ───\x1b[0m\r\n`
+        `\r\n\x1b[90m─── Detached from tmux session${managed.tmuxSession ? ` (${managed.tmuxSession})` : ''}. Press Enter or click ↻ to re-attach ───\x1b[0m\r\n`
+      )
+      this.emitStatus(managed, { exitCode, message: 'Detached — press Enter or ↻ to re-attach' })
+      return
+    }
+
+    // Clean shell exit (`exit` / Ctrl-D) while SSH transport is genuinely healthy
+    if (masterHealthy && exitCode === 0 && livedMs > 3000) {
+      managed.state = 'disconnected'
+      this.events.onData(
+        managed.info.id,
+        `\r\n\x1b[90m─── Session ended (exit ${exitCode}). Press Enter or click ↻ to reconnect ───\x1b[0m\r\n`
       )
       this.emitStatus(managed, { exitCode, message: 'Session ended — press Enter or ↻' })
       return
     }
 
-    // Abnormal disconnect (broken pipe, dead ControlMaster, sleep/wake, VPN roam): auto-reconnect!
-    this.scheduleAutoReconnect(managed, exitCode)
+    // Interactive password/2FA prompt ended without authenticating: let user retry manually
+    if (managed.awaitingInteractiveAuth) {
+      managed.awaitingInteractiveAuth = false
+      managed.state = 'disconnected'
+      this.events.onData(
+        managed.info.id,
+        `\r\n\x1b[33m─── Interactive authentication ended. Press Enter or click ↻ to retry ───\x1b[0m\r\n`
+      )
+      this.emitStatus(managed, { exitCode, message: 'Auth required — press Enter or ↻ to retry' })
+      return
+    }
+
+    // Abnormal disconnect or fast channel failure: force master teardown when transport failed OR exited fast (<5s)
+    const forceMasterReset = !masterHealthy || livedMs < 5000
+    this.scheduleAutoReconnect(managed, exitCode, { forceMasterReset })
   }
 
-  private scheduleAutoReconnect(managed: ManagedTerminal, exitCode?: number): void {
+  private scheduleAutoReconnect(
+    managed: ManagedTerminal,
+    exitCode?: number,
+    opts?: { forceMasterReset?: boolean; lastError?: string }
+  ): void {
     if (managed.closedByUser || managed.reconnectPaused) return
     const attempt = managed.reconnectAttempt + 1
     const maxAttempts = RECONNECT_BACKOFF_MS.length
 
     if (attempt > maxAttempts) {
       managed.state = 'disconnected'
+      const reason = opts?.lastError ? ` (${summarizeSshError(opts.lastError)})` : ''
       this.events.onData(
         managed.info.id,
-        `\r\n\x1b[31m─── Disconnected from ${managed.env.name}. Press Enter, Space, or click ↻ to reconnect ───\x1b[0m\r\n`
+        `\r\n\x1b[31m─── Disconnected from ${managed.env.name}${reason}. Press Enter, Space, or click ↻ to reconnect ───\x1b[0m\r\n`
       )
       this.emitStatus(managed, {
         exitCode,
         attempt: maxAttempts,
         maxAttempts,
-        message: 'Auto-reconnect paused — press Enter or click ↻'
+        message: opts?.lastError
+          ? `${summarizeSshError(opts.lastError)} — click ↻ to retry`
+          : 'Auto-reconnect paused — press Enter or click ↻'
       })
       return
     }
 
     managed.reconnectAttempt = attempt
     const baseDelay = RECONNECT_BACKOFF_MS[attempt - 1]
-    // Add 0..350ms jitter so multiple tabs/splits on the same host don't race each other
-    const jitter = Math.floor(Math.random() * 350)
+    // Jitter helps multiple panes settle cleanly onto the single shared ControlMaster promise
+    const jitter = Math.floor(Math.random() * 400)
     const delayMs = baseDelay + jitter
     managed.state = 'reconnecting'
+    const reason = opts?.lastError
+      ? summarizeSshError(opts.lastError)
+      : `code ${exitCode ?? '?'}`
     this.events.onData(
       managed.info.id,
-      `\r\n\x1b[33m─── Connection lost (code ${exitCode ?? '?'}). Reconnecting to ${managed.env.name} in ${(baseDelay / 1000).toFixed(1)}s (${attempt}/${maxAttempts})... ───\x1b[0m\r\n`
+      `\r\n\x1b[33m─── Connection lost (${reason}). Reconnecting to ${managed.env.name} in ${(baseDelay / 1000).toFixed(1)}s (${attempt}/${maxAttempts})... ───\x1b[0m\r\n`
     )
     this.emitStatus(managed, {
       exitCode,
@@ -1013,14 +1115,59 @@ export class TerminalManager {
     })
 
     const scheduledGen = managed.spawnGeneration
+    const shouldForceMasterReset = Boolean(opts?.forceMasterReset || attempt >= 2)
     managed.reconnectTimer = setTimeout(async () => {
       managed.reconnectTimer = null
       if (managed.closedByUser || managed.reconnectPaused || managed.spawnGeneration !== scheduledGen) return
-      // Serialized per-env socket check/reset prevents sibling tabs from tearing down a fresh master
-      await this.controlMaster.cleanIfDeadSocket(managed.env).catch(() => {})
+
+      // Coordinate ONE shared end-to-end healthy ControlMaster per host BEFORE spawning any pane PTY!
+      // `allowReuseRecentMs: 8000` guarantees a lagging sibling tab reuses a fresh master just established
+      // by another tab instead of tearing it down!
+      const masterRes = await this.controlMaster
+        .ensureHealthyMaster(managed.env, {
+          forceReset: shouldForceMasterReset,
+          allowReuseRecentMs: 8000
+        })
+        .catch((err) => ({ ok: false as const, error: String(err?.message || err) }))
+
       if (managed.closedByUser || managed.reconnectPaused || managed.spawnGeneration !== scheduledGen) return
-      managed.isReattach = true
-      this.spawnPty(managed)
+
+      if (masterRes.ok) {
+        this.envHealthFailures.delete(managed.env.id)
+        this.events.onSshConnected(managed.env.id)
+        managed.isReattach = true
+        this.spawnPty(managed)
+        return
+      }
+
+      if ('nonRetryable' in masterRes && masterRes.nonRetryable) {
+        const msg = summarizeSshError(masterRes.error)
+        managed.state = 'disconnected'
+        this.events.onData(
+          managed.info.id,
+          `\r\n\x1b[31m─── SSH error: ${msg}. Fix SSH config/keys then click ↻ to reconnect ───\x1b[0m\r\n`
+        )
+        this.emitStatus(managed, { message: msg })
+        return
+      }
+
+      if ('needsInteractiveAuth' in masterRes && masterRes.needsInteractiveAuth) {
+        // Spawn ONE interactive SSH PTY so the user can enter password / 2FA without auto-looping
+        managed.awaitingInteractiveAuth = true
+        managed.isReattach = true
+        this.events.onData(
+          managed.info.id,
+          `\r\n\x1b[36m─── Interactive SSH authentication required for ${managed.env.name}... ───\x1b[0m\r\n`
+        )
+        this.spawnPty(managed)
+        return
+      }
+
+      // Transport still unavailable (VPN/Wi-Fi/gateway down): back off cleanly WITHOUT spawning doomed PTYs!
+      this.scheduleAutoReconnect(managed, exitCode, {
+        forceMasterReset: true,
+        lastError: masterRes.error
+      })
     }, delayMs)
   }
 
@@ -1031,17 +1178,10 @@ export class TerminalManager {
     const managed = this.sessions.get(terminalId)
     if (!managed || managed.closedByUser) return
     managed.reconnectPaused = true
+    managed.awaitingInteractiveAuth = false
     managed.spawnGeneration++
     this.resolveTmuxAttachWaiters(managed)
-    this.clearPostAttachResizeTimers(managed)
-    if (managed.reconnectTimer) {
-      clearTimeout(managed.reconnectTimer)
-      managed.reconnectTimer = null
-    }
-    if (managed.sshCheckTimer) {
-      clearInterval(managed.sshCheckTimer)
-      managed.sshCheckTimer = null
-    }
+    this.clearPaneTimers(managed)
     const oldPty = managed.ptyProcess
     managed.ptyProcess = null
     if (oldPty) {
@@ -1058,6 +1198,8 @@ export class TerminalManager {
   /**
    * Reconnects a terminal pane IN-PLACE under the exact same terminalId — preserving 100% of
    * xterm scrollback and re-attaching the pane's remote tmux session seamlessly!
+   * When `forceReset` is true (e.g. user clicked "Reconnect Now"), genuinely tears down any wedged
+   * ControlMaster (including hung mux PIDs) and establishes ONE fresh end-to-end verified master first!
    */
   async reconnect(terminalId: string, opts?: { forceReset?: boolean; env?: Environment }): Promise<void> {
     const managed = this.sessions.get(terminalId)
@@ -1068,18 +1210,10 @@ export class TerminalManager {
     }
 
     managed.reconnectPaused = false
+    managed.awaitingInteractiveAuth = false
     const gen = ++managed.spawnGeneration
     this.resolveTmuxAttachWaiters(managed)
-    this.clearPostAttachResizeTimers(managed)
-
-    if (managed.reconnectTimer) {
-      clearTimeout(managed.reconnectTimer)
-      managed.reconnectTimer = null
-    }
-    if (managed.sshCheckTimer) {
-      clearInterval(managed.sshCheckTimer)
-      managed.sshCheckTimer = null
-    }
+    this.clearPaneTimers(managed)
 
     // Detach old PTY cleanly without firing normal exit deletion
     const oldPty = managed.ptyProcess
@@ -1102,11 +1236,39 @@ export class TerminalManager {
     )
 
     if (managed.env.kind === 'ssh') {
-      if (opts?.forceReset) {
-        await this.controlMaster.resetControlSocket(managed.env).catch(() => {})
-      } else {
-        await this.controlMaster.cleanIfDeadSocket(managed.env).catch(() => {})
+      const masterRes = await this.controlMaster
+        .ensureHealthyMaster(managed.env, { forceReset: Boolean(opts?.forceReset) })
+        .catch((err) => ({ ok: false as const, error: String(err?.message || err) }))
+
+      if (managed.closedByUser || managed.reconnectPaused || managed.spawnGeneration !== gen) return
+
+      if (masterRes.ok) {
+        this.envHealthFailures.delete(managed.env.id)
+        this.events.onSshConnected(managed.env.id)
+        this.spawnPty(managed)
+        return
       }
+
+      if ('nonRetryable' in masterRes && masterRes.nonRetryable) {
+        const msg = summarizeSshError(masterRes.error)
+        managed.state = 'disconnected'
+        this.events.onData(managed.info.id, `\r\n\x1b[31m─── SSH error: ${msg} ───\x1b[0m\r\n`)
+        this.emitStatus(managed, { message: msg })
+        return
+      }
+
+      if ('needsInteractiveAuth' in masterRes && masterRes.needsInteractiveAuth) {
+        managed.awaitingInteractiveAuth = true
+        this.spawnPty(managed)
+        return
+      }
+
+      // Fresh dial failed — enter smooth progressive backoff with the real error displayed
+      this.scheduleAutoReconnect(managed, 255, {
+        forceMasterReset: true,
+        lastError: masterRes.error
+      })
+      return
     }
 
     if (!managed.closedByUser && !managed.reconnectPaused && managed.spawnGeneration === gen) {
@@ -1117,7 +1279,7 @@ export class TerminalManager {
   /**
    * Called on macOS `powerMonitor.on('resume')` (wake from sleep), network `'online'` event,
    * or user "Reconnect All" click to recover disconnected/stale SSH panes cleanly per environment.
-   * Deduplicated & debounced so simultaneous wake + network-online events NEVER collide!
+   * Verifies REAL end-to-end health, establishes ONE fresh ControlMaster per env, then re-attaches panes!
    */
   async handleSystemResume(opts?: { force?: boolean }): Promise<void> {
     if (this.resumeLock) {
@@ -1140,18 +1302,33 @@ export class TerminalManager {
       await Promise.allSettled(
         Array.from(byEnv.values()).map(async (panes) => {
           const env = panes[0].env
-          const alive = await this.controlMaster.isConnected(env)
-          if (!alive) {
-            await this.controlMaster.resetControlSocket(env, { force: true }).catch(() => {})
-          }
-          const targets = alive
+          const healthy = await this.controlMaster.verifyEndToEnd(env, 4000).catch(() => false)
+          const targets = healthy
             ? panes.filter((p) => p.state === 'disconnected' || p.state === 'reconnecting')
             : panes
+          if (targets.length === 0) return
+
+          if (!healthy) {
+            await this.controlMaster.resetControlSocket(env, { force: true }).catch(() => {})
+          }
+          // Pre-warm ONE shared healthy ControlMaster for this env before staggering pane re-attaches
+          const masterRes = await this.controlMaster
+            .ensureHealthyMaster(env, { forceReset: !healthy })
+            .catch((err) => ({ ok: false as const, error: String(err?.message || err) }))
+
           for (let i = 0; i < targets.length; i++) {
-            if (i > 0) {
-              await new Promise((r) => setTimeout(r, 200))
+            const p = targets[i]
+            if (p.closedByUser || p.reconnectPaused) continue
+            if (masterRes.ok) {
+              if (i > 0) await new Promise((r) => setTimeout(r, 180))
+              void this.reconnect(p.info.id, { forceReset: false })
+            } else if ('needsInteractiveAuth' in masterRes && masterRes.needsInteractiveAuth) {
+              if (i === 0) void this.reconnect(p.info.id, { forceReset: false })
+            } else {
+              // Network/VPN not ready yet — hand off cleanly to progressive backoff (no burst!)
+              p.reconnectAttempt = 0
+              this.scheduleAutoReconnect(p, 255, { forceMasterReset: true, lastError: masterRes.error })
             }
-            void this.reconnect(targets[i].info.id, { forceReset: false })
           }
         })
       )
@@ -1173,16 +1350,9 @@ export class TerminalManager {
     for (const managed of this.sessions.values()) {
       if (managed.env.id !== envId || managed.env.kind !== 'ssh') continue
       managed.spawnGeneration++
+      managed.awaitingInteractiveAuth = false
       this.resolveTmuxAttachWaiters(managed)
-      this.clearPostAttachResizeTimers(managed)
-      if (managed.reconnectTimer) {
-        clearTimeout(managed.reconnectTimer)
-        managed.reconnectTimer = null
-      }
-      if (managed.sshCheckTimer) {
-        clearInterval(managed.sshCheckTimer)
-        managed.sshCheckTimer = null
-      }
+      this.clearPaneTimers(managed)
       const oldPty = managed.ptyProcess
       managed.ptyProcess = null
       if (oldPty) {
@@ -1208,7 +1378,7 @@ export class TerminalManager {
       managed.ptyProcess.write(data)
     } else if (managed.state !== 'reconnecting' && (data === '\r' || data === '\n' || data === ' ')) {
       // Pressing Enter or Space in a disconnected pane immediately triggers in-place reconnect/respawn!
-      void this.reconnect(terminalId, { forceReset: false })
+      void this.reconnect(terminalId, { forceReset: managed.env.kind === 'ssh' })
     }
   }
 
@@ -1235,9 +1405,7 @@ export class TerminalManager {
     sess.closedByUser = true
     sess.spawnGeneration++
     this.resolveTmuxAttachWaiters(sess)
-    this.clearPostAttachResizeTimers(sess)
-    if (sess.reconnectTimer) clearTimeout(sess.reconnectTimer)
-    if (sess.sshCheckTimer) clearInterval(sess.sshCheckTimer)
+    this.clearPaneTimers(sess)
     this.sessions.delete(terminalId)
     this.stopHealthMonitorIfIdle()
 
@@ -1257,7 +1425,8 @@ export class TerminalManager {
     ) {
       void this.controlMaster
         .exec(sess.env, `tmux kill-session -t ${shellQuote(sess.tmuxSession)} 2>/dev/null || true`, {
-          timeoutMs: 3000
+          timeoutMs: 3000,
+          reuseOnly: true
         })
         .catch(() => {})
     }

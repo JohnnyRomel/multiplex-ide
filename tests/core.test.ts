@@ -8,10 +8,15 @@ import {
   EnvironmentRegistry,
   createDefaultConfig
 } from '../src/main/ssh/configParser'
-import { SshControlMaster } from '../src/main/ssh/controlMaster'
+import {
+  SshControlMaster,
+  classifySshError,
+  parseControlMasterPid
+} from '../src/main/ssh/controlMaster'
 import {
   buildRemoteTmuxBootstrapCommand,
   extractMideTmuxMarker,
+  isTmuxDetachOutput,
   parseOscNotifications,
   parseRecoverableTmuxOutput,
   stripEraseScrollback
@@ -379,9 +384,35 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
     }
 
     const interactiveArgs = cm.buildBaseSshArgs(sshEnv, { interactive: true })
-    expect(interactiveArgs).toContain('ServerAliveInterval=10')
-    expect(interactiveArgs).toContain('ServerAliveCountMax=2')
-    expect(interactiveArgs).toContain('ConnectTimeout=12')
+    expect(interactiveArgs).toContain('ServerAliveInterval=15')
+    expect(interactiveArgs).toContain('ServerAliveCountMax=3')
+    expect(interactiveArgs).toContain('ConnectTimeout=20')
+    expect(interactiveArgs).toContain('ControlMaster=auto')
+
+    const reuseArgs = cm.buildBaseSshArgs(sshEnv, { batchMode: true, reuseOnly: true })
+    expect(reuseArgs).toContain('ControlMaster=no')
+
+    // Default ControlPath must stay well below macOS 104-byte Unix socket limit (leaving >= 17B for OpenSSH suffix)
+    const defaultCm = new SshControlMaster()
+    expect(Buffer.byteLength(defaultCm.getControlPath(sshEnv), 'utf8')).toBeLessThanOrEqual(80)
+
+    // PID parsing, error classification, and tmux detach detection
+    expect(parseControlMasterPid('Master running (pid=12345)\r\n')).toBe(12345)
+    expect(parseControlMasterPid('Control socket connect: No such file')).toBeNull()
+    expect(classifySshError('Host key verification failed.')).toEqual({
+      needsInteractiveAuth: false,
+      nonRetryable: true
+    })
+    expect(classifySshError('Permission denied (publickey,keyboard-interactive).')).toEqual({
+      needsInteractiveAuth: true,
+      nonRetryable: false
+    })
+    expect(classifySshError('Connection timed out')).toEqual({
+      needsInteractiveAuth: false,
+      nonRetryable: false
+    })
+    expect(isTmuxDetachOutput('foo\r\n[detached (from session mide_1_abcd)]\r\n')).toBe(true)
+    expect(isTmuxDetachOutput('Connection closed by remote host')).toBe(false)
 
     const ctlPath = cm.getControlPath(sshEnv)
     fs.writeFileSync(ctlPath, 'stale-socket-placeholder')
@@ -397,7 +428,12 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
     await cm.resetControlSocket(sshEnv)
     expect(fs.existsSync(ctlPath)).toBe(true)
 
+    // Forced reset (e.g. user clicking Reconnect Now or wedged master teardown) removes it immediately!
+    await cm.resetControlSocket(sshEnv, { force: true })
+    expect(fs.existsSync(ctlPath)).toBe(false)
+
     // Explicit disconnect (force: true) removes it immediately
+    fs.writeFileSync(ctlPath, 'disconnect-placeholder')
     await cm.disconnect(sshEnv)
     expect(fs.existsSync(ctlPath)).toBe(false)
   })

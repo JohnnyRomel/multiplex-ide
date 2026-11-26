@@ -241,7 +241,7 @@ export class UnifiedVfs {
       const res = await this.controlMaster.exec(
         env,
         `git -C ${shellQuote(dir)} rev-parse --abbrev-ref HEAD 2>/dev/null`,
-        { timeoutMs: 4000 }
+        { timeoutMs: 4000, reuseOnly: true }
       )
       return res.code === 0 ? res.stdout.trim() || null : null
     } catch {
@@ -278,7 +278,7 @@ export class UnifiedVfs {
       const res = await this.controlMaster.exec(
         env,
         `git -C ${shellQuote(dir)} status --porcelain 2>/dev/null`,
-        { timeoutMs: 5000 }
+        { timeoutMs: 5000, reuseOnly: true }
       )
       return res.code === 0 ? parsePorcelain(res.stdout) : []
     } catch {

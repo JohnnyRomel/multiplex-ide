@@ -127,7 +127,8 @@ export class OpenSshSftpPool {
       const isChannelBroken = /closed|eof|reset|broken|disconnected|not connected|timed out/i.test(msg)
       if (!hadCached && !isChannelBroken) throw err
       this.dispose(env.id)
-      await this.controlMaster.cleanIfDeadSocket(env).catch(() => {})
+      const masterRes = await this.controlMaster.ensureHealthyMaster(env).catch(() => ({ ok: false }))
+      if (!masterRes.ok) throw err
       const freshSftp = await this.getSession(env)
       return await op(freshSftp)
     }
