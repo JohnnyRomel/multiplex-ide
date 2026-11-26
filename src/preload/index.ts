@@ -122,9 +122,17 @@ const api = {
     ipcRenderer.invoke(IPC.TERM_RECONNECT, terminalId, forceReset),
   pauseTerminalReconnect: (terminalId: string): Promise<void> =>
     ipcRenderer.invoke(IPC.TERM_PAUSE_RECONNECT, terminalId),
-  reconnectAllTerminals: (): Promise<void> => ipcRenderer.invoke(IPC.TERM_RECONNECT_ALL),
+  reconnectAllTerminals: (force = false): Promise<void> => ipcRenderer.invoke(IPC.TERM_RECONNECT_ALL, force),
   listRecoverableTmuxSessions: (envId: string, maxAgeSec = 3600): Promise<RecoverableTmuxSession[]> =>
     ipcRenderer.invoke(IPC.TERM_LIST_RECOVERABLE_TMUX, envId, maxAgeSec),
+  listTmuxSessions: (envId: string): Promise<RecoverableTmuxSession[]> =>
+    ipcRenderer.invoke(IPC.TERM_LIST_TMUX, envId),
+  switchTerminalTmuxSession: (terminalId: string, targetSession?: string): Promise<string | undefined> =>
+    ipcRenderer.invoke(IPC.TERM_SWITCH_TMUX, terminalId, targetSession),
+  killTmuxSession: (envId: string, sessionName: string): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.TERM_KILL_TMUX, envId, sessionName),
+  pruneStaleTmuxSessions: (envId: string, minAgeSec = 3600): Promise<number> =>
+    ipcRenderer.invoke(IPC.TERM_PRUNE_TMUX, envId, minAgeSec),
   onTerminalData: (cb: (terminalId: string, data: string) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, terminalId: string, data: string) => cb(terminalId, data)
     ipcRenderer.on(IPC.TERM_DATA, handler)

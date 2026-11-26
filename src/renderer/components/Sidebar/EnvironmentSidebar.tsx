@@ -40,12 +40,21 @@ export const WorkspaceListSection: React.FC = () => {
   const [dragOverEnvId, setDragOverEnvId] = useState<string | null>(null)
 
   const handleSelectEnv = async (env: Environment) => {
+    const existingCount = collectEnvTerminalIds(useAppStore.getState().terminalTabsByEnv[env.id]).length
+    // `setActiveEnv` triggers `ensureTerminalForEnv` when no tabs exist yet, which cleanly
+    // connects ControlMaster ONCE before restoring saved/active tmux sessions (zero socket race!).
     setActiveEnv(env.id)
-    if (env.kind === 'ssh' && env.status === 'disconnected') {
+    if (env.kind === 'ssh' && env.status === 'disconnected' && existingCount > 0) {
       const res = await window.multiplex.connectEnvironment(env.id)
-      if (!res.ok && res.needsInteractiveAuth) {
+      if (res.ok) {
+        for (const tid of collectEnvTerminalIds(useAppStore.getState().terminalTabsByEnv[env.id])) {
+          const st = useAppStore.getState().terminalStatuses[tid]
+          if (st && (st.state === 'disconnected' || st.state === 'reconnecting')) {
+            void window.multiplex.reconnectTerminal(tid, false)
+          }
+        }
+      } else if (!res.ok && res.needsInteractiveAuth) {
         addToast('info', `${env.name}: complete login in terminal to enable SFTP & Search`)
-        await ensureTerminalForEnv(env.id)
       } else if (!res.ok && res.error) {
         addToast('error', `${env.name}: ${res.error}`)
       }

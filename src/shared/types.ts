@@ -93,6 +93,10 @@ export interface RecoverableTmuxSession {
   attached: number
   command: string
   cwd?: string
+  windows?: number
+  size?: string
+  isManaged?: boolean
+  ownedByApp?: boolean
 }
 
 export interface TerminalSessionInfo {

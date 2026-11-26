@@ -170,13 +170,32 @@ export function registerIpcHandlers(services: MainServices): void {
     terminalManager.pauseReconnect(terminalId)
   })
 
-  ipcMain.handle(IPC.TERM_RECONNECT_ALL, async () => {
-    await terminalManager.handleSystemResume()
+  ipcMain.handle(IPC.TERM_RECONNECT_ALL, async (_e, force = false) => {
+    await terminalManager.handleSystemResume({ force: Boolean(force) })
   })
 
   ipcMain.handle(IPC.TERM_LIST_RECOVERABLE_TMUX, async (_e, envId: string, maxAgeSec = 3600) => {
     const env = requireEnv(envId)
     return terminalManager.listRecoverableTmuxSessions(env, maxAgeSec)
+  })
+
+  ipcMain.handle(IPC.TERM_LIST_TMUX, async (_e, envId: string) => {
+    const env = requireEnv(envId)
+    return terminalManager.listTmuxSessions(env)
+  })
+
+  ipcMain.handle(IPC.TERM_SWITCH_TMUX, async (_e, terminalId: string, targetSession?: string) => {
+    return terminalManager.switchTmuxSession(terminalId, targetSession)
+  })
+
+  ipcMain.handle(IPC.TERM_KILL_TMUX, async (_e, envId: string, sessionName: string) => {
+    const env = requireEnv(envId)
+    return terminalManager.killTmuxSession(env, sessionName)
+  })
+
+  ipcMain.handle(IPC.TERM_PRUNE_TMUX, async (_e, envId: string, minAgeSec = 3600) => {
+    const env = requireEnv(envId)
+    return terminalManager.pruneStaleTmuxSessions(env, minAgeSec)
   })
 
   // --- Unified VFS ---

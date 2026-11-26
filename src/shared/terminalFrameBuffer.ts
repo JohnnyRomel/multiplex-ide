@@ -2,9 +2,9 @@
  * Anti-flicker terminal output coalescer supporting:
  * 1. DEC Mode 2026 Synchronized Output (`\x1b[?2026h` ... `\x1b[?2026l`) — holds partial TUI frames
  *    until the closing marker arrives (with a 60ms safety watchdog so output never stalls).
- * 2. Cursor-hide redraw coalescing (`\x1b[?25l` ... `\x1b[?25h`) — catches erase+redraw cycles from
- *    older tmux (e.g. tmux 2.8) and Ink/TUI apps with a short 18ms hold window so mid-redraw blank
- *    flashes and jumping cursors are merged into one atomic paint!
+ * 2. Erase + cursor-hide redraw coalescing (`\x1b[?25l` combined with screen/line erase sequences) —
+ *    catches mid-frame blank flashes from older tmux (e.g. tmux 2.8) and Ink/TUI apps with a short
+ *    14ms hold window while NEVER delaying plain interactive typing or cursor movement!
  * 3. VSync frame batching — coalesces fragmented SSH TCP packets within a single paint frame into
  *    one `term.write()` call.
  */
@@ -13,10 +13,12 @@ const BSU = '\x1b[?2026h'
 const ESU = '\x1b[?2026l'
 const HIDE_CURSOR = '\x1b[?25l'
 const SHOW_CURSOR = '\x1b[?25h'
+// Matches ANSI clear-line / clear-screen / cursor-home sequences typical of TUI full-frame redraws
+const ERASE_OR_HOME_RE = /\x1b\[(?:[012]?[KJ]|1;1H|H)/
 
 const MAX_BUFFER_BYTES = 256 * 1024
 const SYNC_MAX_HOLD_MS = 60
-const CURSOR_HIDE_HOLD_MS = 18
+const CURSOR_HIDE_HOLD_MS = 14
 
 export interface FrameBufferScheduler {
   scheduleFrame: (cb: () => void) => () => void
@@ -76,6 +78,7 @@ export class TerminalFrameBuffer {
   private partialEsc = ''
   private inSyncUpdate = false
   private cursorHiddenInPending = false
+  private hasEraseInPending = false
   private cancelFrame: (() => void) | null = null
   private cancelWatchdog: (() => void) | null = null
   private disposed = false
@@ -155,9 +158,9 @@ export class TerminalFrameBuffer {
       return
     }
 
-    if (this.cursorHiddenInPending) {
-      // TUI / tmux 2.8 mid-redraw (cursor hidden, waiting for redraw + `?25h`):
-      // briefly hold up to 18ms so erase + text + show-cursor coalesce into 1 atomic write!
+    // Only apply the brief cursor-hide hold when an erase/home sequence is also pending
+    // (genuine mid-frame screen redraw), so interactive keystrokes & cursor updates flush immediately!
+    if (this.cursorHiddenInPending && this.hasEraseInPending) {
       this.clearFrameSchedule()
       if (!this.cancelWatchdog) {
         this.cancelWatchdog = this.scheduler.scheduleTimeout(() => {
@@ -179,6 +182,9 @@ export class TerminalFrameBuffer {
   private appendSegment(seg: string): void {
     if (!seg) return
     this.pending += seg
+    if (!this.hasEraseInPending && seg.includes('\x1b[') && ERASE_OR_HOME_RE.test(seg)) {
+      this.hasEraseInPending = true
+    }
     const lastHide = seg.lastIndexOf(HIDE_CURSOR)
     const lastShow = seg.lastIndexOf(SHOW_CURSOR)
     if (lastHide >= 0 || lastShow >= 0) {
@@ -193,6 +199,7 @@ export class TerminalFrameBuffer {
     const batch = this.pending
     this.pending = ''
     this.cursorHiddenInPending = false
+    this.hasEraseInPending = false
     if (batch) {
       this.onFlush(batch)
     }
@@ -206,6 +213,7 @@ export class TerminalFrameBuffer {
     this.partialEsc = ''
     this.inSyncUpdate = false
     this.cursorHiddenInPending = false
+    this.hasEraseInPending = false
   }
 
   private clearFrameSchedule(): void {

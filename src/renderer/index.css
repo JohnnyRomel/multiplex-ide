@@ -195,8 +195,14 @@ body,
   padding: 6px 8px;
   height: 100%;
 }
-.xterm-screen {
-  transform: translateZ(0);
+.xterm .xterm-helpers {
+  left: 0;
+}
+.xterm .composition-view {
+  background: var(--st-terminal) !important;
+  color: var(--st-text) !important;
+  border-bottom: 1.5px solid var(--st-accent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
 }
 .xterm-viewport {
   overflow-y: auto !important;

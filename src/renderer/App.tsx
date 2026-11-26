@@ -107,7 +107,7 @@ export default function App() {
 
     // Automatically wake and re-attach SSH terminals when macOS network comes back online!
     const onNetworkOnline = () => {
-      void useAppStore.getState().reconnectAllTerminals()
+      void useAppStore.getState().reconnectAllTerminals(false)
     }
     window.addEventListener('online', onNetworkOnline)
 

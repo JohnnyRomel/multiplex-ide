@@ -3,9 +3,9 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebLinksAddon } from '@xterm/addon-web-links'
-import { Columns2, RotateCw, Rows2, Search, WifiOff, X } from 'lucide-react'
+import { Check, ChevronDown, Columns2, Plus, RefreshCw, RotateCw, Rows2, Search, Trash2, WifiOff, X } from 'lucide-react'
 import { TerminalFrameBuffer } from '@shared/terminalFrameBuffer'
-import type { EditorThemeId } from '@shared/types'
+import type { EditorThemeId, RecoverableTmuxSession } from '@shared/types'
 import { useAppStore } from '@renderer/stores/useAppStore'
 import {
   decodeOsc52Payload,
@@ -86,6 +86,13 @@ function getXtermTheme(theme: EditorThemeId) {
   }
 }
 
+function formatSessionAge(ageSec: number): string {
+  if (ageSec < 60) return 'now'
+  if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`
+  if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h ago`
+  return `${Math.floor(ageSec / 86400)}d ago`
+}
+
 interface Props {
   envId: string
   tabId: string
@@ -110,14 +117,34 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
   const closeTerminal = useAppStore((s) => s.closeTerminal)
   const reconnectTerminal = useAppStore((s) => s.reconnectTerminal)
   const pauseTerminalReconnect = useAppStore((s) => s.pauseTerminalReconnect)
+  const switchTerminalTmuxSession = useAppStore((s) => s.switchTerminalTmuxSession)
+  const listRemoteTmuxSessions = useAppStore((s) => s.listRemoteTmuxSessions)
+  const killRemoteTmuxSession = useAppStore((s) => s.killRemoteTmuxSession)
+  const pruneStaleTmuxSessions = useAppStore((s) => s.pruneStaleTmuxSessions)
   const termStatus = useAppStore((s) => s.terminalStatuses[terminalId])
   const env = useAppStore((s) => s.environments.find((e) => e.id === envId))
 
   const [showFind, setShowFind] = useState(false)
   const [findText, setFindText] = useState('')
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [showTmuxMenu, setShowTmuxMenu] = useState(false)
+  const [tmuxMenuPos, setTmuxMenuPos] = useState<{ left: number; top: number }>({ left: 0, top: 0 })
+  const [tmuxSessions, setTmuxSessions] = useState<RecoverableTmuxSession[]>([])
+  const [tmuxLoading, setTmuxLoading] = useState(false)
+  const tmuxMenuRef = useRef<HTMLDivElement>(null)
+  const tmuxBtnRef = useRef<HTMLButtonElement>(null)
   const isFocused = focusedTerminalId === terminalId
   const connState = termStatus?.state || (env?.kind === 'local' ? 'connected' : 'connecting')
+
+  const refreshTmuxList = async () => {
+    setTmuxLoading(true)
+    try {
+      const list = await listRemoteTmuxSessions(envId)
+      setTmuxSessions(list)
+    } finally {
+      setTmuxLoading(false)
+    }
+  }
 
   useEffect(() => {
     const el = containerRef.current
@@ -326,6 +353,43 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
     }
   }, [isVisible, terminalId])
 
+  // Refit cleanly after SSH transitions to connected or switches tmux sessions so remote cols/rows always match
+  useEffect(() => {
+    if (connState === 'connected' && fitRef.current && xtermRef.current) {
+      const timer = setTimeout(() => {
+        try {
+          const term = xtermRef.current
+          if (!term) return
+          fitRef.current?.fit()
+          lastSentSizeRef.current = { cols: term.cols, rows: term.rows }
+          window.multiplex.resizeTerminal(terminalId, term.cols, term.rows)
+        } catch {
+          // ignore
+        }
+      }, 120)
+      return () => clearTimeout(timer)
+    }
+  }, [connState, termStatus?.tmuxSession, terminalId])
+
+  // Close tmux session popover on outside click or Escape
+  useEffect(() => {
+    if (!showTmuxMenu) return
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (tmuxMenuRef.current?.contains(target) || tmuxBtnRef.current?.contains(target)) return
+      setShowTmuxMenu(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowTmuxMenu(false)
+    }
+    window.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', onDown)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [showTmuxMenu])
+
   // Focus xterm cleanly without resizing when focus switches to this pane
   useEffect(() => {
     if (isVisible && isFocused && xtermRef.current) {
@@ -412,14 +476,198 @@ export const TerminalInstance: React.FC<Props> = ({ envId, tabId, paneId, termin
           >
             {env?.name || envId} — {title}
           </span>
-          {termStatus?.tmuxSession && (
-            <span
-              className="rounded px-1 text-[10px] font-mono shrink-0"
-              style={{ backgroundColor: 'rgba(255,255,255,0.06)', color: 'var(--st-text-dim)' }}
-              title={`Persistent remote tmux session: ${termStatus.tmuxSession}`}
-            >
-              tmux
-            </span>
+          {env?.kind === 'ssh' && env.useTmux && (
+            <div className="relative shrink-0">
+              <button
+                ref={tmuxBtnRef}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  const next = !showTmuxMenu
+                  if (next) {
+                    const rect = e.currentTarget.getBoundingClientRect()
+                    const menuW = 320
+                    const menuH = 310
+                    const left = Math.max(8, Math.min(rect.left, window.innerWidth - menuW - 8))
+                    const top =
+                      rect.bottom + menuH < window.innerHeight - 12
+                        ? rect.bottom + 4
+                        : Math.max(8, rect.top - menuH - 4)
+                    setTmuxMenuPos({ left, top })
+                    void refreshTmuxList()
+                  }
+                  setShowTmuxMenu(next)
+                }}
+                className="flex items-center gap-0.5 rounded px-1.5 py-0 text-[10px] font-mono hover:bg-white/15 transition-colors"
+                style={{
+                  backgroundColor: showTmuxMenu ? 'rgba(102, 217, 239, 0.2)' : 'rgba(255,255,255,0.07)',
+                  color: termStatus?.tmuxSession ? 'var(--st-accent-blue)' : 'var(--st-text-dim)'
+                }}
+                title={
+                  termStatus?.tmuxSession
+                    ? `Attached to remote tmux session "${termStatus.tmuxSession}" — click to switch/manage sessions (no need for nested \`tmux a\`)`
+                    : 'Manage remote tmux sessions'
+                }
+              >
+                <span>tmux{termStatus?.tmuxSession ? `:${termStatus.tmuxSession.replace(/^mide_/, '')}` : ''}</span>
+                <ChevronDown className="h-2.5 w-2.5 opacity-70" />
+              </button>
+
+              {showTmuxMenu && (
+                <div
+                  ref={tmuxMenuRef}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  className="fixed z-50 w-[320px] rounded border shadow-2xl text-[11.5px] select-none"
+                  style={{
+                    left: tmuxMenuPos.left,
+                    top: tmuxMenuPos.top,
+                    backgroundColor: 'var(--st-panel)',
+                    borderColor: 'var(--st-border-light)',
+                    color: 'var(--st-text)'
+                  }}
+                >
+                  <div
+                    className="flex items-center justify-between px-2.5 py-1.5 border-b"
+                    style={{ borderColor: 'var(--st-border)' }}
+                  >
+                    <span className="font-semibold text-[11px]" style={{ color: 'var(--st-text-muted)' }}>
+                      Remote tmux Sessions ({env.name})
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void refreshTmuxList()
+                      }}
+                      title="Refresh remote tmux list"
+                      className="rounded p-0.5 hover:bg-white/10"
+                      style={{ color: 'var(--st-text-dim)' }}
+                    >
+                      <RefreshCw className={`h-3 w-3 ${tmuxLoading ? 'animate-spin' : ''}`} />
+                    </button>
+                  </div>
+
+                  <div className="max-h-[240px] overflow-y-auto py-1">
+                    {tmuxLoading && tmuxSessions.length === 0 ? (
+                      <div className="px-3 py-2 text-center font-mono text-[11px]" style={{ color: 'var(--st-text-dim)' }}>
+                        Loading tmux sessions...
+                      </div>
+                    ) : tmuxSessions.length === 0 ? (
+                      <div className="px-3 py-2 text-center font-mono text-[11px]" style={{ color: 'var(--st-text-dim)' }}>
+                        No active remote tmux sessions found
+                      </div>
+                    ) : (
+                      tmuxSessions.map((sess) => {
+                        const isCurrent = sess.name === termStatus?.tmuxSession
+                        const isActiveApp =
+                          sess.command &&
+                          !['zsh', 'bash', 'sh', 'fish', 'dash'].includes(sess.command.replace(/^-/, '').toLowerCase())
+                        return (
+                          <div
+                            key={sess.name}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setShowTmuxMenu(false)
+                              if (!isCurrent) {
+                                void switchTerminalTmuxSession(envId, terminalId, sess.name)
+                              }
+                              xtermRef.current?.focus()
+                            }}
+                            className="group flex items-center justify-between gap-2 px-2.5 py-1.5 cursor-pointer hover:bg-white/10"
+                            style={{
+                              backgroundColor: isCurrent ? 'rgba(102, 217, 239, 0.1)' : undefined
+                            }}
+                            title={`${sess.name} · ${sess.command || 'shell'}${sess.cwd ? ` · ${sess.cwd}` : ''}`}
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              {isCurrent ? (
+                                <Check className="h-3 w-3 shrink-0" style={{ color: 'var(--st-green)' }} />
+                              ) : (
+                                <span
+                                  className="h-1.5 w-1.5 rounded-full shrink-0 ml-0.5 mr-0.5"
+                                  style={{
+                                    backgroundColor: isActiveApp
+                                      ? 'var(--st-accent)'
+                                      : sess.attached > 0
+                                        ? 'var(--st-yellow)'
+                                        : 'var(--st-text-dim)'
+                                  }}
+                                />
+                              )}
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="truncate font-mono font-medium">{sess.name}</span>
+                                  {sess.command && (
+                                    <span
+                                      className="rounded px-1 text-[9.5px] font-mono shrink-0"
+                                      style={{
+                                        backgroundColor: isActiveApp
+                                          ? 'rgba(166, 226, 46, 0.16)'
+                                          : 'rgba(255, 255, 255, 0.08)',
+                                        color: isActiveApp ? 'var(--st-green)' : 'var(--st-text-muted)'
+                                      }}
+                                    >
+                                      {sess.command}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="truncate font-mono text-[10px]" style={{ color: 'var(--st-text-dim)' }}>
+                                  {formatSessionAge(sess.ageSec)}
+                                  {sess.size ? ` · ${sess.size}` : ''}
+                                  {isCurrent ? ' · this pane' : sess.ownedByApp ? ' · other tab' : sess.attached > 0 ? ' · attached' : ''}
+                                </div>
+                              </div>
+                            </div>
+
+                            {!isCurrent && !sess.ownedByApp && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  void killRemoteTmuxSession(envId, sess.name).then(() => refreshTmuxList())
+                                }}
+                                title={`Kill tmux session ${sess.name}`}
+                                className="rounded p-1 opacity-0 group-hover:opacity-100 hover:bg-white/15 shrink-0"
+                                style={{ color: 'var(--st-red)' }}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </button>
+                            )}
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+
+                  <div
+                    className="flex items-center justify-between gap-1 px-2 py-1.5 border-t text-[11px]"
+                    style={{ borderColor: 'var(--st-border)' }}
+                  >
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setShowTmuxMenu(false)
+                        void switchTerminalTmuxSession(envId, terminalId, '__new__')
+                        xtermRef.current?.focus()
+                      }}
+                      className="flex items-center gap-1 rounded px-2 py-0.5 hover:bg-white/10"
+                      style={{ color: 'var(--st-accent)' }}
+                    >
+                      <Plus className="h-3 w-3" />
+                      <span>New Session</span>
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void pruneStaleTmuxSessions(envId, 3600).then(() => refreshTmuxList())
+                      }}
+                      title="Kill unattached mide_* sessions idle > 1 hour"
+                      className="rounded px-2 py-0.5 hover:bg-white/10"
+                      style={{ color: 'var(--st-text-dim)' }}
+                    >
+                      Clean &gt;1h
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
           {connState === 'reconnecting' && (
             <span className="font-mono text-[11px] shrink-0" style={{ color: 'var(--st-yellow)' }}>

@@ -199,7 +199,7 @@ export const TerminalWorkspaceArea: React.FC = () => {
         <div className="flex h-full items-center gap-1 pl-2">
           {hasDisconnectedInEnv && (
             <button
-              onClick={() => void reconnectAllTerminals()}
+              onClick={() => void reconnectAllTerminals(true)}
               title="Reconnect all disconnected SSH terminals"
               className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium hover:brightness-110"
               style={{ backgroundColor: 'rgba(166, 226, 46, 0.16)', color: 'var(--st-accent)' }}
@@ -239,14 +239,23 @@ export const TerminalWorkspaceArea: React.FC = () => {
         </div>
       </div>
 
-      {/* Mounted Terminal Panes (all envs & all tabs stay mounted so switching is 0ms with 100% scrollback!) */}
+      {/* Mounted Terminal Panes (all envs & all tabs stay mounted with real layout dimensions so
+          xterm DOM WidthCache & FitAddon NEVER measure 0px inside `display: none`!) */}
       <div className="relative flex-1 min-h-0 w-full overflow-hidden">
         {Object.entries(terminalTabsByEnv).map(([envId, tabs]) =>
           tabs.map((tab) => {
             const curTabId = activeTerminalTabByEnv[envId] || tabs[0]?.id
             const visible = envId === activeEnvId && tab.id === curTabId
             return (
-              <div key={tab.id} className={visible ? 'h-full w-full' : 'hidden'}>
+              <div
+                key={tab.id}
+                aria-hidden={!visible}
+                className={
+                  visible
+                    ? 'absolute inset-0 z-10'
+                    : 'absolute inset-0 z-0 invisible pointer-events-none'
+                }
+              >
                 <RecursiveSplit envId={envId} tabId={tab.id} node={tab.root} isVisible={visible} />
               </div>
             )

@@ -41,6 +41,7 @@ export class SshControlMaster {
   private ctlDir: string
   private homeCache = new Map<string, string>()
   private resetLocks = new Map<string, Promise<void>>()
+  private connectLocks = new Map<string, Promise<{ ok: boolean; needsInteractiveAuth?: boolean; error?: string }>>()
   private lastResetAt = new Map<string, number>()
 
   constructor(baseDir?: string) {
@@ -197,6 +198,29 @@ export class SshControlMaster {
    */
   async connect(env: Environment): Promise<{ ok: boolean; needsInteractiveAuth?: boolean; error?: string }> {
     if (env.kind === 'local') return { ok: true }
+    if (await this.isConnected(env)) return { ok: true }
+
+    // Deduplicate concurrent connect() calls per environment so sidebar click, file tree,
+    // and terminal bootstrap never race or reset each other's fresh ControlMaster socket!
+    const existingConnect = this.connectLocks.get(env.id)
+    if (existingConnect) {
+      return existingConnect
+    }
+
+    const task = this.connectInternal(env)
+    this.connectLocks.set(env.id, task)
+    try {
+      return await task
+    } finally {
+      if (this.connectLocks.get(env.id) === task) {
+        this.connectLocks.delete(env.id)
+      }
+    }
+  }
+
+  private async connectInternal(
+    env: Environment
+  ): Promise<{ ok: boolean; needsInteractiveAuth?: boolean; error?: string }> {
     if (await this.isConnected(env)) return { ok: true }
 
     // Clear stale socket file before fresh dial

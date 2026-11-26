@@ -402,18 +402,21 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
     expect(fs.existsSync(ctlPath)).toBe(false)
   })
 
-  it('enables tmux mouse scrolling and OSC 52 clipboard overrides without truncating WheelUpPane bindings', () => {
+  it('enables tmux -u attach-session -d, 256color, idempotent OSC 52, and mouse wheel bindings', () => {
     const cmd = buildRemoteTmuxBootstrapCommand('mide_1_abcd', '/workspace/demo')
-    expect(cmd).toContain("tmux set-option -g mouse on")
+    expect(cmd).toContain('tmux set-option -g mouse on')
     expect(cmd).toContain('tmux set-option -t "$MIDE_S" mouse on')
     expect(cmd).toContain('tmux set-option -t "$MIDE_S" status off')
     expect(cmd).toContain('tmux set-option -t "$MIDE_S" history-limit 50000')
-    expect(cmd).toContain('terminal-overrides')
+    expect(cmd).toContain('tmux set-option -s default-terminal "$MIDE_TERM"')
+    expect(cmd).toContain('aggressive-resize on')
+    expect(cmd).toContain('grep -q \'Ms=\'')
     expect(cmd).toContain('set-clipboard on')
     expect(cmd).toContain("select-pane '\\;' send-keys -X -N 3 scroll-up")
+    expect(cmd).toContain('exec tmux -u attach-session -d -t "$MIDE_S"')
 
     // If tmux is installed locally, execute the exact setup snippet against an isolated server
-    // to prove shell quoting preserves `select-pane ; send-keys -X -N 3 scroll-up` end-to-end!
+    // to prove shell quoting, idempotent terminal-overrides, and active-command priority end-to-end!
     let hasTmux = false
     try {
       execFileSync('/bin/sh', ['-c', 'command -v tmux >/dev/null 2>&1'])
@@ -423,14 +426,25 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
     }
     if (hasTmux) {
       const sock = `mide_ut_${process.pid}_${Date.now().toString(36)}`
-      const setupOnly = cmd
-        .replace(/exec tmux attach-session -t "\$MIDE_S";/, '')
-        .replace(/\btmux /g, `tmux -L ${sock} -f /dev/null `)
+      const runTmuxBootstrap = (raw: string) => {
+        const setupOnly = raw
+          .replace(/exec tmux -u attach-session -d -t "\$MIDE_S";/, '')
+          .replace(/\btmux /g, `tmux -L ${sock} -f /dev/null `)
+        return execFileSync('/bin/sh', ['-c', setupOnly], { encoding: 'utf8' })
+      }
       try {
-        const out = execFileSync('/bin/sh', ['-c', setupOnly], { encoding: 'utf8' })
+        const out = runTmuxBootstrap(cmd)
         const marker = extractMideTmuxMarker(out)
         expect(marker.sessionName).toBe('mide_1_abcd')
         expect(marker.cleaned).toBe('')
+
+        // Running bootstrap a second time must NOT append duplicate terminal-overrides entries!
+        runTmuxBootstrap(cmd)
+        const overrides = execFileSync('tmux', ['-L', sock, 'show-options', '-s', 'terminal-overrides'], {
+          encoding: 'utf8'
+        })
+        const msLines = overrides.split('\n').filter((l) => l.includes('Ms='))
+        expect(msLines.length).toBeLessThanOrEqual(2)
 
         const mouseOpt = execFileSync('tmux', ['-L', sock, 'show-options', '-t', 'mide_1_abcd', 'mouse'], {
           encoding: 'utf8'
@@ -455,13 +469,12 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
         expect(viUpLine).toContain('scroll-up')
 
         // Now test `attachRecent: true` automatically discovers and reattaches `mide_1_abcd`!
-        const reattachCmd = buildRemoteTmuxBootstrapCommand('mide_9_new', '/workspace/demo', {
-          attachRecent: true,
-          maxAgeSec: 3600
-        })
-          .replace(/exec tmux attach-session -t "\$MIDE_S";/, '')
-          .replace(/\btmux /g, `tmux -L ${sock} -f /dev/null `)
-        const reattachOut = execFileSync('/bin/sh', ['-c', reattachCmd], { encoding: 'utf8' })
+        const reattachOut = runTmuxBootstrap(
+          buildRemoteTmuxBootstrapCommand('mide_9_new', '/workspace/demo', {
+            attachRecent: true,
+            maxAgeSec: 3600
+          })
+        )
         expect(extractMideTmuxMarker(reattachOut).sessionName).toBe('mide_1_abcd')
       } finally {
         try {
@@ -473,26 +486,34 @@ describe('SSH ControlMaster Resilience & Multi-Tab Reconnect Deduplication', () 
     }
   })
 
-  it('filters recoverable tmux sessions to unattached mide_* active within 1 hour and parses OSC 9991 markers', () => {
+  it('prioritizes active non-shell commands (e.g. agy) over newer idle shells and parses OSC 9991 markers', () => {
     const now = 1795600000
     const sample = [
       `__NOW__:${now}`,
-      `mide_old\t${now - 7200}\t0\tagy\t/workspace`,
-      `mide_attached\t${now - 100}\t1\tagy\t/workspace`,
-      `personal_dev\t${now - 60}\t0\tzsh\t/home/user`,
-      `mide_recent_2\t${now - 1200}\t0\tzsh\t/workspace`,
-      `mide_recent_1\t${now - 180}\t0\tagy\t/workspace/app`,
-      `mide_owned\t${now - 50}\t0\tbash\t/workspace`
+      `mide_old\t${now - 7200}\t0\tagy\t/workspace\t1\t190x44`,
+      `mide_attached\t${now - 100}\t1\tagy\t/workspace\t1\t190x44`,
+      `personal_dev\t${now - 60}\t0\tzsh\t/home/user\t1\t190x44`,
+      `mide_idle_newer\t${now - 90}\t0\tzsh\t/workspace\t1\t190x44`,
+      `mide_agy_older\t${now - 300}\t0\tagy\t/workspace/app\t1\t262x53`,
+      `mide_owned\t${now - 50}\t0\tbash\t/workspace\t1\t190x44`
     ].join('\n')
 
     const list = parseRecoverableTmuxOutput(sample, 3600, new Set(['mide_owned']))
-    expect(list.map((s) => s.name)).toEqual(['mide_recent_1', 'mide_recent_2'])
+    // Active `agy` session MUST outrank slightly newer empty `zsh` shell!
+    expect(list.map((s) => s.name)).toEqual(['mide_agy_older', 'mide_idle_newer'])
     expect(list[0].command).toBe('agy')
-    expect(list[0].ageSec).toBe(180)
-    expect(list[1].ageSec).toBe(1200)
+    expect(list[0].ageSec).toBe(300)
+    expect(list[0].size).toBe('262x53')
+    expect(list[1].ageSec).toBe(90)
 
-    const extracted = extractMideTmuxMarker('before\x1b]9991;mide_recent_1\x07after')
-    expect(extracted.sessionName).toBe('mide_recent_1')
+    // With includeGhostAttached: true, ghost-attached unowned sessions are still recoverable behind unattached ones
+    const withGhost = parseRecoverableTmuxOutput(sample, 3600, new Set(['mide_owned']), {
+      includeGhostAttached: true
+    })
+    expect(withGhost.map((s) => s.name)).toEqual(['mide_agy_older', 'mide_idle_newer', 'mide_attached'])
+
+    const extracted = extractMideTmuxMarker('before\x1b]9991;mide_agy_older\x07after')
+    expect(extracted.sessionName).toBe('mide_agy_older')
     expect(extracted.cleaned).toBe('beforeafter')
   })
 })
@@ -562,6 +583,34 @@ describe('Anti-Flicker Terminal Frame Coalescer', () => {
     expect(frameCb).not.toBeNull()
     frameCb!()
     expect(flushed).toEqual(['\x1b[?25l\x1b[2K\ragy prompt > \x1b[?25h'])
+    buf.dispose()
+  })
+
+  it('does NOT stall interactive typing or plain cursor-hide chunks lacking an erase sequence', () => {
+    const flushed: string[] = []
+    let frameCb: (() => void) | null = null
+    let timeoutCb: (() => void) | null = null
+    const buf = new TerminalFrameBuffer((b) => flushed.push(b), {
+      scheduleFrame: (cb) => {
+        frameCb = cb
+        return () => {
+          if (frameCb === cb) frameCb = null
+        }
+      },
+      scheduleTimeout: (cb) => {
+        timeoutCb = cb
+        return () => {
+          if (timeoutCb === cb) timeoutCb = null
+        }
+      }
+    })
+
+    // Plain typing echo or TUI cursor hide WITHOUT clear-line/clear-screen must flush on next VSync immediately
+    buf.push('\x1b[?25lhello')
+    expect(timeoutCb).toBeNull()
+    expect(frameCb).not.toBeNull()
+    frameCb!()
+    expect(flushed).toEqual(['\x1b[?25lhello'])
     buf.dispose()
   })
 })
