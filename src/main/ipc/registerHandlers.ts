@@ -376,6 +376,27 @@ export function registerIpcHandlers(services: MainServices): void {
     searchManager.cancelFileQuery(requestId)
   })
 
+  ipcMain.handle(
+    IPC.SEARCH_SYMBOL_QUERY,
+    async (
+      _e,
+      req: {
+        envId: string
+        rootPath: string
+        symbol: string
+        currentFilePath: string
+        currentLine?: number
+        language?: string
+        qualifier?: string
+        maxResults?: number
+        slot?: string
+      }
+    ) => {
+      const env = requireEnv(req.envId)
+      return searchManager.querySymbolReferences(env, req.rootPath, req)
+    }
+  )
+
   // --- System Clipboard & Native Edit ---
   const shellQuotePath = (p: string) => `'${p.replace(/'/g, `'\\''`)}'`
 

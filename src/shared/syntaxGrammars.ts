@@ -420,3 +420,174 @@ export const enhancedPythonLanguage: any = {
     ]
   }
 }
+
+/**
+ * Rock-solid POSIX / Bash / Zsh Monarch grammar replacing Monaco's buggy built-in `shell.js`.
+ * Fixes all double-quote corruption bugs:
+ * - Escaped quotes (`\"`, `\\`, `\$`) inside `"..."` never close strings prematurely
+ * - Nested `"$(echo "inner")"` and `"${VAR:-"default"}"` push/pop states cleanly (never `@popall`!)
+ * - Indented & inline `# comments` properly ignore quotes/apostrophes (`# don't break`)
+ * - Proper `<<EOF ... EOF` heredoc consumption & `$'...'` ANSI-C quoting
+ */
+export const enhancedShellLanguage: any = {
+  defaultToken: '',
+  tokenPostfix: '.shell',
+
+  keywords: [
+    'if', 'then', 'else', 'elif', 'fi', 'for', 'in', 'do', 'done', 'while', 'until',
+    'case', 'esac', 'select', 'function', 'return', 'exit', 'break', 'continue',
+    'local', 'export', 'readonly', 'declare', 'typeset', 'unset', 'set', 'shopt',
+    'source', 'trap', 'shift', 'eval', 'exec', 'time', 'coproc'
+  ],
+
+  builtins: [
+    'echo', 'printf', 'cd', 'pwd', 'ls', 'cat', 'grep', 'egrep', 'fgrep', 'rg', 'sed', 'awk', 'gawk',
+    'find', 'xargs', 'mkdir', 'rm', 'rmdir', 'cp', 'mv', 'chmod', 'chown', 'ln', 'touch',
+    'head', 'tail', 'sort', 'uniq', 'wc', 'cut', 'tr', 'tee', 'diff', 'patch',
+    'curl', 'wget', 'tar', 'gzip', 'gunzip', 'zip', 'unzip',
+    'git', 'ssh', 'scp', 'rsync', 'tmux', 'docker', 'kubectl',
+    'python', 'python3', 'pip', 'pip3', 'node', 'npm', 'npx', 'make', 'cmake', 'ninja', 'bazel',
+    'gcc', 'g++', 'clang', 'clang++', 'cargo', 'go',
+    'kill', 'killall', 'pkill', 'ps', 'pgrep', 'sleep', 'wait', 'test', 'read',
+    'command', 'type', 'which', 'dirname', 'basename', 'realpath', 'readlink', 'mktemp', 'date', 'env', 'sudo'
+  ],
+
+  constants: ['true', 'false'],
+
+  tokenizer: {
+    root: [
+      [/^#!.*$/, 'keyword.directive'],
+      [/(^|[ \t]+)(#[ \t]*(?:TODO|FIXME|NOTE|HACK|XXX).*)$/, ['white', 'comment.todo']],
+      [/(^|[ \t]+)(#.*)$/, ['white', 'comment']],
+      [/[ \t\r\n]+/, 'white'],
+
+      // Here-string `<<<` must match BEFORE heredoc `<<`
+      [/<<</, 'operator'],
+      [/<<-?\s*'([A-Za-z_][\w-]*)'/, { token: 'string.quote', next: '@heredoc.$1' }],
+      [/<<-?\s*"([A-Za-z_][\w-]*)"/, { token: 'string.quote', next: '@heredoc.$1' }],
+      [/<<-?\s*\\?([A-Za-z_][\w-]*)/, { token: 'string.quote', next: '@heredoc.$1' }],
+
+      // Escaped literal outside quotes (e.g. `echo \"hello\"` must NOT open a string)
+      [/\\./, 'string.escape'],
+
+      // Strings
+      [/\$'/, { token: 'string.quote', next: '@ansiString' }],
+      [/'/, { token: 'string.quote', next: '@singleString' }],
+      [/"/, { token: 'string.quote', next: '@dblString' }],
+      [/`/, { token: 'string.quote', next: '@backtick' }],
+
+      // Substitutions & variables
+      [/\$\(\(/, { token: 'delimiter.parenthesis', next: '@arithSubst' }],
+      [/\$\(/, { token: 'variable.language', next: '@cmdSubst' }],
+      [/\$\{/, { token: 'variable.language', next: '@paramBrace' }],
+      [/\$(?:\d+|[a-zA-Z_]\w*|[*@#?$!-])/, 'variable.language'],
+
+      // Function declarations: `foo() {`
+      [/([a-zA-Z_]\w*)(\s*\(\s*\))/, ['entity.name.function', 'delimiter']],
+
+      // Variable assignments: `FOO=bar`, `PATH+=:...`
+      [/([a-zA-Z_]\w*)(\+?=)/, ['variable.parameter', 'operator']],
+
+      // CLI flags (`--foo-bar`, `-rf`)
+      [/--?[a-zA-Z0-9][\w-]*/, 'attribute.name'],
+
+      // Keywords, builtins, constants, identifiers
+      [
+        /[a-zA-Z_]\w*/,
+        {
+          cases: {
+            '@keywords': 'keyword',
+            '@builtins': 'support.function',
+            '@constants': 'constant.language',
+            '@default': 'identifier'
+          }
+        }
+      ],
+
+      // Numbers
+      [/0[xX][0-9a-fA-F]+/, 'number'],
+      [/\d+(?:\.\d+)?/, 'number'],
+
+      // Redirections, pipes, logical & test operators
+      [/\d*>&\d+|\d*>>|\d*<>|&&|\|\||;;|==|!=|=~|<=|>=|[|&<>!]=?/, 'operator'],
+      [/\[\[|\]\]|[{}()[\]]/, '@brackets'],
+      [/[;,.?:]/, 'delimiter']
+    ],
+
+    dblString: [
+      [/\\["\\$`]/, 'string.escape'],
+      [/\\./, 'string'],
+      [/\$\(\(/, { token: 'delimiter.parenthesis', next: '@arithSubst' }],
+      [/\$\(/, { token: 'variable.language', next: '@cmdSubst' }],
+      [/\$\{/, { token: 'variable.language', next: '@paramBrace' }],
+      [/`/, { token: 'string.quote', next: '@backtick' }],
+      [/\$(?:\d+|[a-zA-Z_]\w*|[*@#?$!-])/, 'variable.language'],
+      [/"/, { token: 'string.quote', next: '@pop' }],
+      [/[^\\"$`]+/, 'string'],
+      [/[$`]/, 'string']
+    ],
+
+    singleString: [
+      [/'/, { token: 'string.quote', next: '@pop' }],
+      [/[^']+/, 'string']
+    ],
+
+    ansiString: [
+      [/\\./, 'string.escape'],
+      [/'/, { token: 'string.quote', next: '@pop' }],
+      [/[^\\']+/, 'string']
+    ],
+
+    backtick: [
+      [/\\./, 'string.escape'],
+      [/`/, { token: 'string.quote', next: '@pop' }],
+      [/[^\\`]+/, 'string']
+    ],
+
+    cmdSubst: [
+      [/\)/, { token: 'variable.language', next: '@pop' }],
+      [/\(/, { token: 'delimiter.parenthesis', next: '@parenGroup' }],
+      { include: '@root' }
+    ],
+
+    parenGroup: [
+      [/\)/, { token: 'delimiter.parenthesis', next: '@pop' }],
+      [/\(/, { token: 'delimiter.parenthesis', next: '@parenGroup' }],
+      { include: '@root' }
+    ],
+
+    paramBrace: [
+      [/\}/, { token: 'variable.language', next: '@pop' }],
+      [/\$\{/, { token: 'variable.language', next: '@paramBrace' }],
+      [/\$\(/, { token: 'variable.language', next: '@cmdSubst' }],
+      [/"/, { token: 'string.quote', next: '@dblString' }],
+      [/'/, { token: 'string.quote', next: '@singleString' }],
+      [/\\./, 'string.escape'],
+      [/[#%:/\-+=?]+/, 'operator'],
+      [/[^}"'$\\#%:/\-+=?]+/, 'variable.language'],
+      [/./, 'variable.language']
+    ],
+
+    arithSubst: [
+      [/\)\)/, { token: 'delimiter.parenthesis', next: '@pop' }],
+      [/[a-zA-Z_]\w*/, 'variable.language'],
+      [/0[xX][0-9a-fA-F]+|\d+/, 'number'],
+      [/[+\-*/%&|^~!=<>?:,()]/, 'operator'],
+      [/\s+/, 'white'],
+      [/./, '']
+    ],
+
+    heredoc: [
+      [
+        /^\s*([A-Za-z_][\w-]*)\s*$/,
+        {
+          cases: {
+            '$1==$S2': { token: 'string.quote', next: '@pop' },
+            '@default': 'string'
+          }
+        }
+      ],
+      [/.*$/, 'string']
+    ]
+  }
+}

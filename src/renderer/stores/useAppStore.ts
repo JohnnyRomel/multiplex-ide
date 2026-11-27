@@ -10,6 +10,7 @@ import type {
   TerminalStatusEvent,
   TransferTask
 } from '@shared/types'
+import type { SymbolOccurrence } from '@shared/symbolIntel'
 
 export type TerminalSplitNode =
   | { type: 'leaf'; paneId: string; terminalId: string; title: string }
@@ -89,6 +90,22 @@ export interface EditorCursorInfo {
   column: number
   language: string
   tabSize: number
+}
+
+export interface NavLocation {
+  envId: string
+  path: string
+  line: number
+  column: number
+}
+
+export interface SymbolRefsOverlayState {
+  symbol: string
+  envId: string
+  currentFilePath: string
+  loading: boolean
+  occurrences: SymbolOccurrence[]
+  truncated: boolean
 }
 
 function makeId(prefix: string): string {
@@ -293,6 +310,9 @@ interface AppState {
   activeTabId: string | null
   secondaryTabId: string | null
   cursorInfo: EditorCursorInfo
+  navBackStack: NavLocation[]
+  navForwardStack: NavLocation[]
+  symbolRefsOverlay: SymbolRefsOverlayState | null
 
   searchId: string | null
   searchQuery: string
@@ -372,6 +392,10 @@ interface AppState {
   clearPendingPosition: (tabId: string) => void
   saveTab: (tabId: string) => Promise<boolean>
   closeTab: (tabId: string, force?: boolean) => void
+  pushNavLocation: (loc: NavLocation) => void
+  navigateBack: (currentLoc?: NavLocation) => Promise<void>
+  navigateForward: (currentLoc?: NavLocation) => Promise<void>
+  setSymbolRefsOverlay: (overlay: SymbolRefsOverlayState | null) => void
 
   setSearchQuery: (q: string) => void
   setSearchEnvIds: (ids: string[]) => void
@@ -552,6 +576,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeTabId: null,
   secondaryTabId: null,
   cursorInfo: { line: 1, column: 1, language: 'plaintext', tabSize: 2 },
+  navBackStack: [],
+  navForwardStack: [],
+  symbolRefsOverlay: null,
 
   searchId: null,
   searchQuery: '',
@@ -1684,6 +1711,42 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     })
   },
+
+  pushNavLocation: (loc) =>
+    set((s) => {
+      const prev = s.navBackStack[s.navBackStack.length - 1]
+      if (prev && prev.envId === loc.envId && prev.path === loc.path && Math.abs(prev.line - loc.line) <= 1) {
+        return { navForwardStack: [] }
+      }
+      return {
+        navBackStack: [...s.navBackStack.slice(-49), loc],
+        navForwardStack: []
+      }
+    }),
+
+  navigateBack: async (currentLoc) => {
+    const s = get()
+    if (s.navBackStack.length === 0) return
+    const target = s.navBackStack[s.navBackStack.length - 1]
+    set((st) => ({
+      navBackStack: st.navBackStack.slice(0, -1),
+      navForwardStack: currentLoc ? [...st.navForwardStack.slice(-49), currentLoc] : st.navForwardStack
+    }))
+    await get().openFile(target.envId, target.path, { line: target.line, column: target.column })
+  },
+
+  navigateForward: async (currentLoc) => {
+    const s = get()
+    if (s.navForwardStack.length === 0) return
+    const target = s.navForwardStack[s.navForwardStack.length - 1]
+    set((st) => ({
+      navForwardStack: st.navForwardStack.slice(0, -1),
+      navBackStack: currentLoc ? [...st.navBackStack.slice(-49), currentLoc] : st.navBackStack
+    }))
+    await get().openFile(target.envId, target.path, { line: target.line, column: target.column })
+  },
+
+  setSymbolRefsOverlay: (symbolRefsOverlay) => set({ symbolRefsOverlay }),
 
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSearchEnvIds: (searchEnvIds) => set({ searchEnvIds }),

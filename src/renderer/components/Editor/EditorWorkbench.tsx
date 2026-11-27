@@ -1,18 +1,29 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import * as monaco from 'monaco-editor'
 import { Allotment } from 'allotment'
-import { FileSearch, GitCompare, Save, Search, Settings, Terminal, X } from 'lucide-react'
+import {
+  ArrowLeft,
+  ArrowLeftRight,
+  ArrowRight,
+  FileSearch,
+  GitCompare,
+  ListTree,
+  Loader2,
+  Save,
+  Search,
+  Settings,
+  Terminal,
+  X
+} from 'lucide-react'
+import { isHeaderPath, isSourcePath } from '@shared/symbolIntel'
 import logoUrl from '@renderer/assets/logo.png'
 import { FileIcon } from '@renderer/components/Common/FileIcon'
 import { type EditorTab, useAppStore } from '@renderer/stores/useAppStore'
 import { registerMonacoEditor, unregisterMonacoEditor } from '@renderer/utils/clipboardBridge'
 import { bindSublimeKeybindings, getMonacoThemeName, initMonacoSublime } from './monacoSetup'
+import { jumpToCodeLocation, switchCppHeaderSource, tabModelUri } from './codeIntel'
 
 initMonacoSublime()
-
-function tabModelUri(envId: string, filePath: string): monaco.Uri {
-  return monaco.Uri.parse(`multiplex://${encodeURIComponent(envId)}/${encodeURI(filePath)}`)
-}
 
 interface MonacoPaneProps {
   tab: EditorTab | null
@@ -75,7 +86,7 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
         automaticLayout: true,
         readOnly: true,
         renderSideBySide: true,
-        fontFamily: 'Menlo, "SF Mono", "JetBrains Mono", Monaco, monospace',
+        fontFamily: 'ui-monospace, "SF Mono", Menlo, "JetBrains Mono", Monaco, monospace',
         fontSize: initialFontSize,
         lineHeight: initialLineHeight,
         minimap: { enabled: false }
@@ -109,7 +120,7 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
     const ed = monaco.editor.create(el, {
       theme: getMonacoThemeName(useAppStore.getState().theme),
       automaticLayout: true,
-      fontFamily: 'Menlo, "SF Mono", "JetBrains Mono", Monaco, monospace',
+      fontFamily: 'ui-monospace, "SF Mono", Menlo, "JetBrains Mono", Monaco, monospace',
       fontSize: initialFontSize,
       lineHeight: initialLineHeight,
       tabSize: 2,
@@ -117,7 +128,15 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
       smoothScrolling: true,
       cursorBlinking: 'phase',
       renderLineHighlight: 'line',
-      multiCursorModifier: 'ctrlCmd',
+      // `alt` lets `⌘+Click` trigger C++/symbol Go-to-Definition (VS Code macOS standard),
+      // while `⌥+Click` adds multi-cursors!
+      multiCursorModifier: 'alt',
+      hover: {
+        enabled: true,
+        delay: 220,
+        sticky: true
+      },
+      occurrencesHighlight: 'singleFile',
       scrollBeyondLastLine: true,
       minimap: {
         enabled: true,
@@ -137,10 +156,32 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
       }
     })
 
+    const getCurrentNav = () => {
+      const cur = activeTabRef.current
+      const pos = ed.getPosition()
+      if (!cur || cur.isDiff || !pos) return undefined
+      return { envId: cur.envId, path: cur.path, line: pos.lineNumber, column: pos.column }
+    }
+
     bindSublimeKeybindings(ed, {
       onSave: () => {
         const cur = activeTabRef.current
         if (cur) void saveTab(cur.id)
+      },
+      onSwitchHeaderSource: () => {
+        const cur = activeTabRef.current
+        if (!cur || cur.isDiff) return
+        void switchCppHeaderSource(cur.envId, cur.path).then((ok) => {
+          if (!ok) {
+            useAppStore.getState().addToast('info', `No matching header/source found for ${cur.name}`)
+          }
+        })
+      },
+      onNavigateBack: () => {
+        void useAppStore.getState().navigateBack(getCurrentNav())
+      },
+      onNavigateForward: () => {
+        void useAppStore.getState().navigateForward(getCurrentNav())
       }
     })
 
@@ -373,16 +414,18 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
           </div>
 
           <div className="grid grid-cols-2 gap-x-8 gap-y-1 text-[12px] font-mono opacity-65 pt-1">
-            <span>Switch Workspace</span>
-            <span>⌘ 1 .. ⌘ 9</span>
-            <span>Switch Editor Tab</span>
-            <span>⌥ ⌘ ← / →</span>
-            <span>Switch Terminal Tab</span>
-            <span>⌘ ⇧ [ / ]</span>
+            <span>Go to Definition</span>
+            <span>⌘+Click / F12</span>
+            <span>Find References</span>
+            <span>Hover / ⇧F12</span>
+            <span>Goto Symbol in File</span>
+            <span>⌘R / ⌘⇧O</span>
+            <span>Switch .h ↔ .cpp</span>
+            <span>⌥⌘O</span>
+            <span>Navigate Back / Fwd</span>
+            <span>⌃- / ⌃⇧-</span>
             <span>Split Terminal</span>
-            <span>⌘ \ / ⌘ ⇧ \</span>
-            <span>Font Size</span>
-            <span>⌘ + / ⌘ - / ⌘ 0</span>
+            <span>⌘D / ⌘⇧D</span>
           </div>
         </div>
       )}
@@ -414,6 +457,214 @@ const MonacoPane: React.FC<MonacoPaneProps> = ({ tab, group }) => {
   )
 }
 
+/**
+ * Interactive floating Symbol References & Definitions Overlay (`⇧F12` or Hover "All References").
+ */
+const SymbolReferencesOverlay: React.FC = () => {
+  const overlay = useAppStore((s) => s.symbolRefsOverlay)
+  const setSymbolRefsOverlay = useAppStore((s) => s.setSymbolRefsOverlay)
+
+  const [filter, setFilter] = useState('')
+  const [tabFilter, setTabFilter] = useState<'all' | 'defs' | 'file'>('all')
+  const [selectedIdx, setSelectedIdx] = useState(0)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (!overlay) return
+    setFilter('')
+    setTabFilter('all')
+    setSelectedIdx(0)
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }, [overlay?.symbol, overlay?.envId])
+
+  const filtered = useMemo(() => {
+    if (!overlay) return []
+    let items = overlay.occurrences.filter((o) => o.kind !== 'comment')
+    if (tabFilter === 'defs') {
+      items = items.filter((o) => o.kind === 'definition' || o.kind === 'declaration')
+    } else if (tabFilter === 'file') {
+      items = items.filter((o) => o.filePath === overlay.currentFilePath)
+    }
+    const q = filter.trim().toLowerCase()
+    if (q) {
+      items = items.filter(
+        (o) => o.relativePath.toLowerCase().includes(q) || o.lineText.toLowerCase().includes(q)
+      )
+    }
+    return items
+  }, [overlay, filter, tabFilter])
+
+  useEffect(() => {
+    setSelectedIdx((i) => Math.min(i, Math.max(0, filtered.length - 1)))
+  }, [filtered.length])
+
+  if (!overlay) return null
+
+  const nonComment = overlay.occurrences.filter((o) => o.kind !== 'comment')
+  const defCount = nonComment.filter((o) => o.kind === 'definition' || o.kind === 'declaration').length
+  const fileCount = nonComment.filter((o) => o.filePath === overlay.currentFilePath).length
+
+  const openOccurrence = (occ: (typeof filtered)[number], keepOpen: boolean) => {
+    void jumpToCodeLocation(occ.envId, occ.filePath, occ.line, occ.column)
+    if (!keepOpen) setSymbolRefsOverlay(null)
+  }
+
+  return (
+    <div
+      onMouseDown={(e) => e.stopPropagation()}
+      className="absolute top-2 right-3 z-40 flex w-[520px] max-w-[92%] max-h-[70%] flex-col rounded-md border shadow-2xl overflow-hidden text-[12px]"
+      style={{
+        backgroundColor: 'rgba(24, 25, 21, 0.96)',
+        borderColor: 'var(--st-border-light)',
+        backdropFilter: 'blur(16px)'
+      }}
+    >
+      {/* Header */}
+      <div
+        className="flex items-center justify-between gap-2 px-3 py-2 border-b"
+        style={{ borderColor: 'var(--st-border)' }}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="font-mono font-semibold truncate" style={{ color: 'var(--st-accent)' }}>
+            {overlay.symbol}
+          </span>
+          <span className="font-mono text-[10.5px] shrink-0" style={{ color: 'var(--st-text-dim)' }}>
+            {nonComment.length}
+            {overlay.truncated ? '+' : ''} refs
+          </span>
+          {overlay.loading && (
+            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" style={{ color: 'var(--st-accent-blue)' }} />
+          )}
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {(
+            [
+              ['all', `All (${nonComment.length})`],
+              ['defs', `Defs (${defCount})`],
+              ['file', `This File (${fileCount})`]
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              onClick={() => {
+                setTabFilter(id)
+                setSelectedIdx(0)
+              }}
+              className="rounded px-1.5 py-0.5 text-[10.5px] font-mono transition-colors"
+              style={{
+                backgroundColor: tabFilter === id ? 'rgba(255,255,255,0.14)' : 'transparent',
+                color: tabFilter === id ? 'var(--st-text)' : 'var(--st-text-dim)'
+              }}
+            >
+              {label}
+            </button>
+          ))}
+          <button
+            onClick={() => setSymbolRefsOverlay(null)}
+            title="Close (Esc)"
+            className="ml-1 rounded p-0.5 hover:bg-white/10"
+            style={{ color: 'var(--st-text-dim)' }}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Filter box */}
+      <div
+        className="flex items-center gap-1.5 px-3 py-1.5 border-b"
+        style={{ borderColor: 'var(--st-border)', backgroundColor: 'rgba(0,0,0,0.2)' }}
+      >
+        <Search className="h-3.5 w-3.5 opacity-50 shrink-0" />
+        <input
+          ref={inputRef}
+          value={filter}
+          onChange={(e) => {
+            setFilter(e.target.value)
+            setSelectedIdx(0)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              setSymbolRefsOverlay(null)
+            } else if (e.key === 'ArrowDown') {
+              e.preventDefault()
+              setSelectedIdx((i) => Math.min(Math.max(0, filtered.length - 1), i + 1))
+            } else if (e.key === 'ArrowUp') {
+              e.preventDefault()
+              setSelectedIdx((i) => Math.max(0, i - 1))
+            } else if (e.key === 'Enter' && filtered[selectedIdx]) {
+              e.preventDefault()
+              openOccurrence(filtered[selectedIdx], e.metaKey || e.shiftKey)
+            }
+          }}
+          placeholder="Filter references... (⏎ jump · ⌘⏎ jump & keep open)"
+          className="w-full bg-transparent font-mono text-[11.5px] outline-none"
+          style={{ color: 'var(--st-text)' }}
+        />
+      </div>
+
+      {/* Results list */}
+      <div className="flex-1 overflow-y-auto py-1">
+        {filtered.length === 0 ? (
+          <div className="px-4 py-6 text-center font-mono text-[11.5px]" style={{ color: 'var(--st-text-dim)' }}>
+            {overlay.loading ? 'Scanning workspace...' : 'No matching references'}
+          </div>
+        ) : (
+          filtered.map((occ, idx) => {
+            const selected = idx === selectedIdx
+            const isDef = occ.kind === 'definition'
+            const isDecl = occ.kind === 'declaration'
+            const isCurFile = occ.filePath === overlay.currentFilePath
+            return (
+              <div
+                key={`${occ.filePath}:${occ.line}:${occ.column}:${idx}`}
+                onMouseEnter={() => setSelectedIdx(idx)}
+                onClick={(e) => openOccurrence(occ, e.metaKey || e.shiftKey)}
+                className="flex flex-col gap-0.5 px-3 py-1.5 cursor-pointer border-b border-white/[0.03]"
+                style={{
+                  backgroundColor: selected ? 'rgba(255, 255, 255, 0.09)' : 'transparent'
+                }}
+              >
+                <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    {(isDef || isDecl) && (
+                      <span
+                        className="rounded px-1 py-0 text-[9.5px] font-semibold uppercase shrink-0"
+                        style={{
+                          backgroundColor: isDef ? 'rgba(166, 226, 46, 0.18)' : 'rgba(102, 217, 239, 0.18)',
+                          color: isDef ? 'var(--st-green)' : 'var(--st-accent-blue)'
+                        }}
+                      >
+                        {isDef ? 'def' : 'decl'}
+                      </span>
+                    )}
+                    <span
+                      className="truncate"
+                      style={{ color: isCurFile ? 'var(--st-accent-blue)' : 'var(--st-text-muted)' }}
+                    >
+                      {occ.relativePath}
+                    </span>
+                  </div>
+                  <span className="shrink-0 tabular-nums" style={{ color: 'var(--st-text-dim)' }}>
+                    :{occ.line}
+                  </span>
+                </div>
+                <div
+                  className="truncate font-mono text-[11.5px]"
+                  style={{ color: selected ? 'var(--st-text)' : 'var(--st-text-muted)' }}
+                >
+                  {occ.lineText.trim()}
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
+}
+
 export const EditorWorkbench: React.FC = () => {
   const tabs = useAppStore((s) => s.tabs)
   const activeTabId = useAppStore((s) => s.activeTabId)
@@ -421,10 +672,14 @@ export const EditorWorkbench: React.FC = () => {
   const editorColumns = useAppStore((s) => s.editorColumns)
   const editorFocusGroup = useAppStore((s) => s.editorFocusGroup)
   const environments = useAppStore((s) => s.environments)
+  const navBackStack = useAppStore((s) => s.navBackStack)
+  const navForwardStack = useAppStore((s) => s.navForwardStack)
   const setActiveTab = useAppStore((s) => s.setActiveTab)
   const closeTab = useAppStore((s) => s.closeTab)
   const saveTab = useAppStore((s) => s.saveTab)
   const openDiffTab = useAppStore((s) => s.openDiffTab)
+  const navigateBack = useAppStore((s) => s.navigateBack)
+  const navigateForward = useAppStore((s) => s.navigateForward)
 
   const [showDiffPicker, setShowDiffPicker] = useState(false)
 
@@ -439,10 +694,22 @@ export const EditorWorkbench: React.FC = () => {
   const secondaryTab = tabs.find((t) => t.id === secondaryTabId) || null
   const focusedTab = editorFocusGroup === 1 && editorColumns === 2 ? secondaryTab : primaryTab
   const envMap = new Map(environments.map((e) => [e.id, e]))
+  const canSwitchHeader = Boolean(
+    focusedTab && !focusedTab.isDiff && (isHeaderPath(focusedTab.path) || isSourcePath(focusedTab.path))
+  )
+
+  const currentNavLoc = focusedTab && !focusedTab.isDiff
+    ? {
+        envId: focusedTab.envId,
+        path: focusedTab.path,
+        line: useAppStore.getState().cursorInfo.line || 1,
+        column: useAppStore.getState().cursorInfo.column || 1
+      }
+    : undefined
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden" style={{ backgroundColor: 'var(--st-editor)' }}>
-      {/* Authentic Sublime Text 3 Tab Strip */}
+      {/* Authentic Sublime Text 3 Tab Strip + Navigation Controls */}
       <div
         className="flex h-[36px] shrink-0 items-end justify-between pr-2"
         style={{ backgroundColor: 'var(--st-tabbar)' }}
@@ -502,12 +769,75 @@ export const EditorWorkbench: React.FC = () => {
           })}
         </div>
 
-        <div className="relative flex h-full items-center gap-1 pl-2">
+        <div className="relative flex h-full items-center gap-0.5 pl-2">
+          {/* Jump Back / Forward History Controls (`⌃-` / `⌃⇧-`) */}
+          {(navBackStack.length > 0 || navForwardStack.length > 0) && (
+            <>
+              <button
+                onClick={() => void navigateBack(currentNavLoc)}
+                disabled={navBackStack.length === 0}
+                title="Navigate Back (⌃-)"
+                className="rounded p-1 hover:bg-white/10 disabled:opacity-25"
+                style={{ color: 'var(--st-text-dim)' }}
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => void navigateForward(currentNavLoc)}
+                disabled={navForwardStack.length === 0}
+                title="Navigate Forward (⌃⇧-)"
+                className="rounded p-1 hover:bg-white/10 disabled:opacity-25"
+                style={{ color: 'var(--st-text-dim)' }}
+              >
+                <ArrowRight className="h-3.5 w-3.5" />
+              </button>
+            </>
+          )}
+
+          {/* Switch C/C++ Header ↔ Source (`⌥⌘O`) */}
+          {canSwitchHeader && focusedTab && (
+            <button
+              onClick={() => {
+                void switchCppHeaderSource(focusedTab.envId, focusedTab.path).then((ok) => {
+                  if (!ok) {
+                    useAppStore.getState().addToast('info', `No matching header/source found for ${focusedTab.name}`)
+                  }
+                })
+              }}
+              title="Switch Header / Source (⌥⌘O)"
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-mono hover:bg-white/10"
+              style={{ color: 'var(--st-accent-blue)' }}
+            >
+              <ArrowLeftRight className="h-3 w-3" />
+              <span>{isHeaderPath(focusedTab.path) ? '.cpp' : '.h'}</span>
+            </button>
+          )}
+
+          {/* Goto Symbol Outline (`⌘R` / `⌘⇧O`) */}
+          {focusedTab && !focusedTab.isDiff && !focusedTab.isBinary && (
+            <button
+              onClick={() => {
+                const editors = monaco.editor.getEditors()
+                const targetUri = tabModelUri(focusedTab.envId, focusedTab.path).toString()
+                const ed = editors.find((e) => e.getModel()?.uri.toString() === targetUri) || editors[0]
+                if (ed) {
+                  ed.focus()
+                  ed.trigger('toolbar', 'editor.action.quickOutline', null)
+                }
+              }}
+              title="Goto Symbol in File (⌘R / ⌘⇧O)"
+              className="rounded p-1 hover:bg-white/10"
+              style={{ color: 'var(--st-text-dim)' }}
+            >
+              <ListTree className="h-3.5 w-3.5" />
+            </button>
+          )}
+
           {focusedTab && !focusedTab.isDiff && focusedTab.isDirty && (
             <button
               onClick={() => void saveTab(focusedTab.id)}
               title="Save (⌘S)"
-              className="flex items-center gap-1 rounded px-2.5 py-0.5 text-[11.5px] font-medium text-[#111]"
+              className="ml-1 flex items-center gap-1 rounded px-2.5 py-0.5 text-[11.5px] font-medium text-[#111]"
               style={{ backgroundColor: 'var(--st-dirty)' }}
             >
               <Save className="h-3.5 w-3.5" />
@@ -561,7 +891,7 @@ export const EditorWorkbench: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 w-full">
+      <div className="relative flex-1 min-h-0 w-full">
         {editorColumns === 1 ? (
           <MonacoPane tab={primaryTab} group={0} />
         ) : (
@@ -574,6 +904,8 @@ export const EditorWorkbench: React.FC = () => {
             </Allotment.Pane>
           </Allotment>
         )}
+
+        <SymbolReferencesOverlay />
       </div>
     </div>
   )

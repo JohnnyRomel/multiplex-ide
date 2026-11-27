@@ -6,6 +6,7 @@ import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker'
 import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
 import type { EditorThemeId } from '@shared/types'
 import { registerEnhancedSyntaxHighlighting } from './languages'
+import { openReferencesOverlayForEditor, registerCodeIntelligence } from './codeIntel'
 
 let initialized = false
 
@@ -23,8 +24,10 @@ export function initMonacoSublime(): void {
     }
   }
 
-  // Install rich non-LSP Sublime Text 3-style syntax rules for C/C++ & Python
+  // Install rich non-LSP Sublime Text 3-style syntax rules for C/C++, Python & Shell
   registerEnhancedSyntaxHighlighting()
+  // Register non-LSP Hover References, C++ Go-to-Definition, Document Highlights & Outline
+  registerCodeIntelligence()
 
   // 1. Classic Sublime Text 3 Monokai
   monaco.editor.defineTheme('sublime-monokai', {
@@ -80,6 +83,12 @@ export function initMonacoSublime(): void {
       'editorGutter.background': '#272822',
       'editorWidget.background': '#1d1e1a',
       'editorWidget.border': '#11120e',
+      'editorHoverWidget.background': '#1d1e1a',
+      'editorHoverWidget.border': '#383930',
+      'editorHoverWidget.foreground': '#f8f8f2',
+      'editor.wordHighlightBackground': '#a6e22e22',
+      'editor.wordHighlightStrongBackground': '#66d9ef30',
+      'editor.wordHighlightBorder': '#a6e22e44',
       'editorSuggestWidget.background': '#1d1e1a',
       'editorSuggestWidget.border': '#11120e',
       'editorSuggestWidget.selectedBackground': '#34352e',
@@ -147,6 +156,12 @@ export function initMonacoSublime(): void {
       'editorGutter.background': '#303841',
       'editorWidget.background': '#242a32',
       'editorWidget.border': '#15191f',
+      'editorHoverWidget.background': '#222830',
+      'editorHoverWidget.border': '#3b4552',
+      'editorHoverWidget.foreground': '#d8dee9',
+      'editor.wordHighlightBackground': '#5fb3b324',
+      'editor.wordHighlightStrongBackground': '#fac86330',
+      'editor.wordHighlightBorder': '#5fb3b344',
       'minimap.background': '#2d353e',
       'minimapSlider.background': '#d8dee914',
       'minimapSlider.hoverBackground': '#d8dee928',
@@ -202,6 +217,12 @@ export function initMonacoSublime(): void {
       'editorGutter.background': '#282c34',
       'editorWidget.background': '#1d1f25',
       'editorWidget.border': '#121417',
+      'editorHoverWidget.background': '#1b1e24',
+      'editorHoverWidget.border': '#333842',
+      'editorHoverWidget.foreground': '#dcdfe4',
+      'editor.wordHighlightBackground': '#61afef24',
+      'editor.wordHighlightStrongBackground': '#98c37930',
+      'editor.wordHighlightBorder': '#61afef44',
       'minimap.background': '#252931',
       'minimapSlider.background': '#abb2bf14',
       'minimapSlider.hoverBackground': '#abb2bf28',
@@ -220,7 +241,12 @@ export function getMonacoThemeName(theme: EditorThemeId): string {
 
 export function bindSublimeKeybindings(
   editor: monaco.editor.IStandaloneCodeEditor,
-  callbacks: { onSave: () => void }
+  callbacks: {
+    onSave: () => void
+    onSwitchHeaderSource?: () => void
+    onNavigateBack?: () => void
+    onNavigateForward?: () => void
+  }
 ): void {
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
     callbacks.onSave()
@@ -243,4 +269,47 @@ export function bindSublimeKeybindings(
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyL, () => {
     editor.trigger('sublime', 'editor.action.insertCursorAtEndOfEachLineSelected', null)
   })
+
+  // Sublime `⌘R` & VS Code `⌘⇧O` -> Goto Symbol in File (functions, classes, macros)
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyR, () => {
+    editor.trigger('code-intel', 'editor.action.quickOutline', null)
+  })
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyO, () => {
+    editor.trigger('code-intel', 'editor.action.quickOutline', null)
+  })
+
+  // `⇧F12` -> Interactive Workspace References & Definitions Overlay
+  editor.addAction({
+    id: 'mide.action.findReferences',
+    label: 'Find All References',
+    keybindings: [monaco.KeyMod.Shift | monaco.KeyCode.F12],
+    contextMenuGroupId: 'navigation',
+    contextMenuOrder: 1.5,
+    run: (ed) => {
+      void openReferencesOverlayForEditor(ed)
+    }
+  })
+
+  // `⌥⌘O` -> Switch C/C++ Header / Source (`.h` ↔ `.cpp`)
+  if (callbacks.onSwitchHeaderSource) {
+    const fn = callbacks.onSwitchHeaderSource
+    editor.addAction({
+      id: 'mide.action.switchHeaderSource',
+      label: 'Switch Header / Source (.h ↔ .cpp)',
+      keybindings: [monaco.KeyMod.Alt | monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO],
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 1.8,
+      run: () => fn()
+    })
+  }
+
+  // `⌃-` / `⌃⇧-` -> Navigate Back / Forward (classic VS Code / Xcode jump history!)
+  if (callbacks.onNavigateBack) {
+    const back = callbacks.onNavigateBack
+    editor.addCommand(monaco.KeyMod.WinCtrl | monaco.KeyCode.Minus, () => back())
+  }
+  if (callbacks.onNavigateForward) {
+    const fwd = callbacks.onNavigateForward
+    editor.addCommand(monaco.KeyMod.WinCtrl | monaco.KeyMod.Shift | monaco.KeyCode.Minus, () => fwd())
+  }
 }

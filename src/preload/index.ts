@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '@shared/ipc'
+import type { SymbolOccurrence } from '@shared/symbolIntel'
 import type {
   CustomHostInput,
   EditorThemeId,
@@ -218,6 +219,18 @@ const api = {
     ipcRenderer.invoke(IPC.SEARCH_FILES_QUERY, envId, rootPath, query, requestId, limit),
   cancelFileSearch: (requestId: string): Promise<void> =>
     ipcRenderer.invoke(IPC.SEARCH_FILES_CANCEL, requestId),
+  querySymbolReferences: (req: {
+    envId: string
+    rootPath: string
+    symbol: string
+    currentFilePath: string
+    currentLine?: number
+    language?: string
+    qualifier?: string
+    maxResults?: number
+    slot?: string
+  }): Promise<{ occurrences: SymbolOccurrence[]; truncated: boolean }> =>
+    ipcRenderer.invoke(IPC.SEARCH_SYMBOL_QUERY, req),
   onSearchMatchBatch: (cb: (matches: SearchMatch[]) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, matches: SearchMatch[]) => cb(matches)
     ipcRenderer.on(IPC.SEARCH_MATCH_BATCH, handler)

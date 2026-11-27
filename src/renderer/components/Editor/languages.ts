@@ -1,5 +1,5 @@
 import * as monaco from 'monaco-editor'
-import { enhancedCppLanguage, enhancedPythonLanguage } from '@shared/syntaxGrammars'
+import { enhancedCppLanguage, enhancedPythonLanguage, enhancedShellLanguage } from '@shared/syntaxGrammars'
 
 export const enhancedCppConf: monaco.languages.LanguageConfiguration = {
   comments: { lineComment: '//', blockComment: ['/*', '*/'] },
@@ -54,6 +54,31 @@ export const enhancedPythonConf: monaco.languages.LanguageConfiguration = {
   ]
 }
 
+export const enhancedShellConf: monaco.languages.LanguageConfiguration = {
+  comments: { lineComment: '#' },
+  brackets: [
+    ['{', '}'],
+    ['[', ']'],
+    ['(', ')']
+  ],
+  autoClosingPairs: [
+    { open: '{', close: '}' },
+    { open: '[', close: ']' },
+    { open: '(', close: ')' },
+    { open: '"', close: '"', notIn: ['string'] },
+    { open: "'", close: "'", notIn: ['string', 'comment'] },
+    { open: '`', close: '`', notIn: ['string', 'comment'] }
+  ],
+  surroundingPairs: [
+    { open: '{', close: '}' },
+    { open: '[', close: ']' },
+    { open: '(', close: ')' },
+    { open: '"', close: '"' },
+    { open: "'", close: "'" },
+    { open: '`', close: '`' }
+  ]
+}
+
 export function registerEnhancedSyntaxHighlighting(): void {
   const applyCpp = (langId: string) => {
     monaco.languages.setMonarchTokensProvider(langId, enhancedCppLanguage)
@@ -73,5 +98,14 @@ export function registerEnhancedSyntaxHighlighting(): void {
   applyPy()
   monaco.languages.onLanguage('python', () => {
     setTimeout(applyPy, 0)
+  })
+
+  const applyShell = () => {
+    monaco.languages.setMonarchTokensProvider('shell', enhancedShellLanguage)
+    monaco.languages.setLanguageConfiguration('shell', enhancedShellConf)
+  }
+  applyShell()
+  monaco.languages.onLanguage('shell', () => {
+    setTimeout(applyShell, 0)
   })
 }

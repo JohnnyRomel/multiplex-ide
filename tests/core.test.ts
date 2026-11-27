@@ -25,7 +25,15 @@ import {
 import { UnifiedVfs, decodeTextBuffer } from '../src/main/fs/vfs'
 import { TransferManager } from '../src/main/fs/transferManager'
 import { SearchManager, parseGrepLine, parseRgJsonLine, scoreQuickOpenCandidate } from '../src/main/search/searchManager'
-import { enhancedCppLanguage, enhancedPythonLanguage } from '../src/shared/syntaxGrammars'
+import { enhancedCppLanguage, enhancedPythonLanguage, enhancedShellLanguage } from '../src/shared/syntaxGrammars'
+import {
+  classifySymbolMatch,
+  extractCppQualifier,
+  extractDocumentSymbols,
+  getSiblingHeaderSourceCandidates,
+  isNavigableSymbol,
+  parseCppIncludeAtLine
+} from '../src/shared/symbolIntel'
 import { decodeOsc52Payload } from '../src/shared/osc52'
 import { TerminalFrameBuffer } from '../src/shared/terminalFrameBuffer'
 import {
@@ -39,6 +47,8 @@ import {
 } from '../src/shared/terminalKeymap'
 // @ts-expect-error internal monaco esm module for unit testing Monarch compilation
 import { compile } from 'monaco-editor/esm/vs/editor/standalone/common/monarch/monarchCompile.js'
+// @ts-expect-error internal monaco esm module for unit testing Monarch tokenization
+import { MonarchTokenizer } from 'monaco-editor/esm/vs/editor/standalone/common/monarch/monarchLexer.js'
 import type { Environment, SearchDoneEvent, SearchMatch, TransferTask } from '../src/shared/types'
 
 let tmpRoot: string
@@ -378,8 +388,8 @@ describe('Unified VFS & TransferManager', () => {
   })
 })
 
-describe('Enhanced Non-LSP C++ and Python Monarch Grammars', () => {
-  it('compiles enhanced C++ and Python Monarch grammars without any invalid rule errors', () => {
+describe('Enhanced Non-LSP C++, Python, and Shell Monarch Grammars', () => {
+  it('compiles enhanced C++, Python, and Shell Monarch grammars and tokenizes complex .sh double quotes cleanly', () => {
     const compiledCpp = compile('cpp', enhancedCppLanguage)
     expect(compiledCpp.tokenPostfix).toBe('.cpp')
     expect(compiledCpp.tokenizer.root.length).toBeGreaterThan(10)
@@ -387,6 +397,38 @@ describe('Enhanced Non-LSP C++ and Python Monarch Grammars', () => {
     const compiledPy = compile('python', enhancedPythonLanguage)
     expect(compiledPy.tokenPostfix).toBe('.python')
     expect(compiledPy.tokenizer.root.length).toBeGreaterThan(10)
+
+    const compiledSh = compile('shell', enhancedShellLanguage)
+    expect(compiledSh.tokenPostfix).toBe('.shell')
+    expect(compiledSh.tokenizer.root.length).toBeGreaterThan(10)
+
+    // Verify tricky .sh double-quote patterns NEVER leak string state onto subsequent lines!
+    const tokenizer = new MonarchTokenizer(null, null, 'shell', compiledSh, {
+      getValue: () => 20000,
+      onDidChangeConfiguration: () => ({ dispose() {} })
+    })
+    const scriptLines = [
+      '#!/usr/bin/env bash',
+      '  # indented comment with "unmatched quote and apostrophe don\'t break',
+      'MSG="hello \\"escaped\\" world"',
+      'OUT="$(echo "nested double quotes" | grep "nested")"',
+      'VAL="${MY_VAR:-"default value"}"',
+      'cat <<\'EOF\'',
+      '  unmatched "quote and \'apostrophe inside heredoc',
+      'EOF',
+      'echo "after_all_clean"'
+    ]
+    let state = tokenizer.getInitialState()
+    let lastTokens: Array<{ offset: number; type: string }> = []
+    for (const line of scriptLines) {
+      const res = tokenizer.tokenize(line, false, state)
+      state = res.endState
+      lastTokens = res.tokens
+    }
+    // Final line `echo "after_all_clean"` MUST start in root state with `echo` as `support.function.shell`!
+    expect(lastTokens[0]?.type).toBe('support.function.shell')
+    expect(lastTokens.some((t) => t.type === 'string.shell')).toBe(true)
+    tokenizer.dispose()
   })
 })
 
@@ -766,5 +808,94 @@ describe('iTerm2 macOS Keymap & Multi-Line Paste Safety', () => {
   <string>/tmp/test&apos;s.txt</string>
 </array></plist>`
     expect(parseMacOsFilenamesPlist(plist)).toEqual(["/Users/alice/docs/a & b.png", "/tmp/test's.txt"])
+  })
+})
+
+describe('Lightweight C++ Code Intelligence & Workspace Symbol References', () => {
+  it('extracts C++ outline symbols, parses #include targets, resolves sibling headers, and classifies definitions', () => {
+    const cppSource = [
+      '#include "core/my_handler.h"',
+      '#define MAX_ITEMS 128',
+      'namespace engine {',
+      'class MyHandler {',
+      ' public:',
+      '  int Process(int x);',
+      '};',
+      'int MyHandler::Process(int x) {',
+      '  return x + MAX_ITEMS;',
+      '}',
+      '}'
+    ].join('\n')
+
+    const inc = parseCppIncludeAtLine('#include "core/my_handler.h"')
+    expect(inc?.target).toBe('core/my_handler.h')
+    expect(inc?.isSystem).toBe(false)
+
+    const siblings = getSiblingHeaderSourceCandidates('/repo/src/my_handler.cpp')
+    expect(siblings).toContain('/repo/src/my_handler.h')
+    expect(siblings).toContain('/repo/include/my_handler.h')
+
+    expect(extractCppQualifier('  MyHandler::Process(42);', 14)).toBe('MyHandler')
+    expect(isNavigableSymbol('MyHandler', 'cpp')).toBe(true)
+    expect(isNavigableSymbol('return', 'cpp')).toBe(false)
+
+    expect(classifySymbolMatch('class MyHandler {', 'MyHandler', 'cpp', '/repo/my_handler.h')).toBe('definition')
+    expect(classifySymbolMatch('class MyHandler;', 'MyHandler', 'cpp', '/repo/fwd.h')).toBe('declaration')
+    expect(classifySymbolMatch('int MyHandler::Process(int x) {', 'Process', 'cpp', '/repo/my_handler.cpp')).toBe('definition')
+    expect(classifySymbolMatch('  int Process(int x);', 'Process', 'cpp', '/repo/my_handler.h')).toBe('declaration')
+    expect(classifySymbolMatch('  handler.Process(42);', 'Process', 'cpp', '/repo/main.cpp')).toBe('reference')
+    expect(classifySymbolMatch('  // Process comment', 'Process', 'cpp', '/repo/main.cpp')).toBe('comment')
+
+    const syms = extractDocumentSymbols(cppSource, 'cpp')
+    expect(syms.map((s) => s.name)).toEqual(['MAX_ITEMS', 'engine', 'MyHandler', 'MyHandler::Process'])
+  })
+
+  it('finds and ranks C++ definitions ahead of declarations and references across files', async () => {
+    const cppRepo = path.join(tmpRoot, 'cpp_nav_repo')
+    fs.mkdirSync(cppRepo, { recursive: true })
+    const headerPath = path.join(cppRepo, 'order_book.h')
+    const implPath = path.join(cppRepo, 'order_book.cpp')
+    const mainPath = path.join(cppRepo, 'main.cpp')
+
+    fs.writeFileSync(
+      headerPath,
+      'class OrderBook {\n public:\n  bool MatchOrder(int id);\n};\n'
+    )
+    fs.writeFileSync(
+      implPath,
+      '#include "order_book.h"\nbool OrderBook::MatchOrder(int id) {\n  return id > 0;\n}\n'
+    )
+    fs.writeFileSync(
+      mainPath,
+      '#include "order_book.h"\nint main() {\n  OrderBook ob;\n  return ob.MatchOrder(7) ? 0 : 1;\n}\n'
+    )
+
+    const cm = new SshControlMaster(path.join(tmpRoot, 'ctl-sym'))
+    const sm = new SearchManager(cm, { onMatchBatch: () => {}, onDone: () => {} })
+    const localEnv: Environment = {
+      id: 'local',
+      kind: 'local',
+      name: 'Local',
+      defaultPath: cppRepo,
+      color: '#fff',
+      useTmux: false,
+      source: 'config',
+      status: 'connected'
+    }
+
+    const res = await sm.querySymbolReferences(localEnv, cppRepo, {
+      symbol: 'MatchOrder',
+      currentFilePath: mainPath,
+      currentLine: 4,
+      language: 'cpp'
+    })
+
+    expect(res.occurrences.length).toBe(3)
+    expect(res.occurrences[0].filePath).toBe(implPath)
+    expect(res.occurrences[0].kind).toBe('definition')
+    expect(res.occurrences[1].filePath).toBe(headerPath)
+    expect(res.occurrences[1].kind).toBe('declaration')
+    expect(res.occurrences[2].filePath).toBe(mainPath)
+    expect(res.occurrences[2].kind).toBe('reference')
   })
 })

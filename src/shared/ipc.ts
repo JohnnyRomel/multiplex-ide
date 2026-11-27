@@ -65,6 +65,7 @@ export const IPC = {
   SEARCH_LIST_FILES: 'search:list-files',
   SEARCH_FILES_QUERY: 'search:files-query',
   SEARCH_FILES_CANCEL: 'search:files-cancel',
+  SEARCH_SYMBOL_QUERY: 'search:symbol-query',
 
   // System Clipboard & Native Edit
   CLIPBOARD_READ_TEXT: 'clipboard:read-text',
